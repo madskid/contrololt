@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Unconfigured ONUs</h2>
+<div class="card pad row wrap gap">
+  <label>OLT <select id="olt"><option value="">All OLTs</option></select></label>
+  <button class="primary" id="scan">Scan</button>
+  <span class="muted small">Runs <code>show gpon onu uncfg</code> (C300/C320) or <code>show pon onu uncfg</code> (C600/C620) on the selected OLT.</span>
+</div>
+<div class="card pad small muted">Click <b>Authorize</b> to register an ONU. Complete and confirm the form to send the action directly; the OLT must be enabled in Settings → OLTs → Edit.</div>
+<div id="errors"></div>
+<div class="card scroll"><table id="tbl"><thead><tr><th>OLT</th><th>Board</th><th>Port</th><th>ONU index</th><th>SN</th><th>State</th><th></th></tr></thead><tbody></tbody></table></div>
+<details class="pad"><summary>Raw OLT output</summary><pre class="out" id="raw"></pre></details>
+<dialog id="reg-dialog"><form id="reg-form" method="dialog" class="stack"></form></dialog>
+{% endblock %}
+{% block scripts %}<script src="/static/unconfigured.js"></script>{% endblock %}

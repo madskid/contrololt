@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}ControlOLT Manager{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/configured">ControlOLT Manager</a>
+  <nav>
+    {% if user_role != "read_only" %}<a href="/unconfigured" class="{{ 'on' if active == 'unconfigured' }}">Unconfigured</a>{% endif %}
+    <a href="/configured" class="{{ 'on' if active == 'configured' }}">Configured</a>
+    <a href="/diagnostics" class="{{ 'on' if active == 'diagnostics' }}">Diagnostics</a>
+    {% if user_role != "read_only" %}
+    <a href="/graphs" class="{{ 'on' if active == 'graphs' }}">Graphs</a>
+    <a href="#" id="nav-save">Save config</a>
+    <div class="dd"><button class="link {{ 'on' if active == 'settings' }}">Settings ▾</button>
+      <div class="menu">
+        <a href="/settings/olts">OLTs</a><a href="/settings/zones">Zones</a>
+        <a href="/settings/speed-profiles">Speed profiles</a><a href="/settings/onu-types">ONU types</a><a href="/settings/audit">Audit log</a>
+        <a href="/settings/users">Users</a>
+      </div></div>
+    {% endif %}
+  </nav>
+  <span class="grow"></span>
+  <span id="ws-dot" class="dot off" title="Realtime"></span><span id="ws-text" class="muted small">offline</span>
+  <span class="muted small">{{ "Read only" if user_role == "read_only" else "Administrator" }}</span>
+  <form method="post" action="/logout" class="inline"><button class="link">Log out ({{ user }})</button></form>
+</header>
+<main>{% block content %}{% endblock %}</main>
+<footer class="foot">ControlOLT Manager v1</footer>
+<dialog id="plan-dialog"></dialog>
+<div id="toast"></div>
+<script src="/static/app.js"></script>
+<script src="/static/plan.js"></script>
+<script>window.USER_ROLE = {{ user_role|tojson }}; window.CURRENT_USER = {{ user|tojson }};</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

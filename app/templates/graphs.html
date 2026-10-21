@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card pad row wrap gap">
+  <label>OLT <select id="olt"></select></label>
+  <label>Range <select id="hours"><option value="6">6 hours</option><option value="24" selected>24 hours</option><option value="168">7 days</option><option value="336">14 days</option></select></label>
+  <span class="seg" id="tabs">
+    <button data-t="olt" class="on">OLT</button><button data-t="uplink">Uplink</button><button data-t="pon">PON</button>
+    <button data-t="traffic">Traffic</button><button data-t="signal">Signal</button><button data-t="status">Status</button>
+  </span>
+</div>
+<div id="grid" class="charts"></div>
+{% endblock %}
+{% block scripts %}<script src="/static/graphs.js"></script>{% endblock %}

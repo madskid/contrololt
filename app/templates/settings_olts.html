@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row between"><div><h2>OLTs</h2><div class="muted small">Add and manage OLTs connected to the dashboard.</div></div>
+  <button class="primary" id="btn-add">+ Add OLT</button></div>
+<div class="card pad row wrap gap">
+  <input id="f-q" placeholder="Name, IP, model" class="grow">
+  <select id="f-status"><option value="">All statuses</option><option value="online">Online</option><option value="offline">Offline</option><option value="syncing">Syncing</option><option value="pending">Pending</option></select>
+</div>
+<div class="card scroll">
+  <table id="olt-table">
+    <thead><tr><th>ID</th><th>Status</th><th>Name</th><th>OLT IP</th><th>TCP</th><th>UDP</th><th>Hardware</th><th>SW</th><th>ONU</th><th>Write</th><th>Last poll</th><th>Config saved</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <p id="olt-empty" class="muted pad" hidden>No OLTs yet. Click “Add OLT”.</p>
+</div>
+<dialog id="olt-dialog">
+  <form id="olt-form" method="dialog" class="stack">
+    <h3 id="dlg-title">Add OLT</h3>
+    <div class="grid2">
+      <label>Name<input name="name" required maxlength="100"></label>
+      <label>IP / Hostname<input name="ip" required maxlength="64"></label>
+      <label>OLT model<select name="model_sel"></select></label>
+      <label id="model-manual-wrap" hidden>Model name (manual)<input name="model_manual" maxlength="50" placeholder="e.g. C650"></label>
+      <label id="family-wrap" hidden>CLI command style<select name="cli_family"></select></label>
+      <label>Shelf<input name="shelf" type="number" value="1" min="0" max="16"></label>
+      <label>Telnet port<input name="telnet_port" type="number" value="23"></label>
+      <label>Telnet user<input name="telnet_user" required></label>
+      <label>Telnet password<input name="telnet_pass" type="password" autocomplete="new-password"></label>
+      <label>Enable password<input name="enable_pass" type="password" autocomplete="new-password" placeholder="leave blank to use the Telnet password"></label>
+      <label>SNMP community<input name="snmp_community" value="public"></label>
+      <label>SNMP port<input name="snmp_port" type="number" value="161"></label>
+      <label class="wide" style="flex-direction:row;gap:.5rem;align-items:center;font-size:13px;color:var(--fg)"><input name="write_enabled" type="checkbox"> Allow changes to this OLT from the dashboard (ONU registration, VLAN, reboot, etc.)</label>
+    </div>
+    <p class="muted small" id="pw-hint" hidden>Leave the password/community blank to keep the current value.</p>
+    <pre id="test-out" class="out" hidden></pre>
+    <div class="row end">
+      <button type="button" id="btn-test">Test connection</button>
+      <button type="button" id="btn-cancel">Cancel</button>
+      <button class="primary" id="btn-save" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="/static/olts.js"></script>{% endblock %}

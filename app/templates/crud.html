@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block content %}
+<div id="crud-a"></div>
+<div id="crud-b"></div>
+<dialog id="crud-dialog"><form method="dialog" class="stack" id="crud-form"></form></dialog>
+{% endblock %}
+{% block scripts %}<script>window.CRUD = "{{ crud }}";</script><script src="/static/crud.js"></script>{% endblock %}

@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Audit log</h2><div class="muted small">Every change sent to an OLT from the dashboard (passwords are masked).</div>
+<div class="card scroll"><table id="tbl"><thead><tr><th>Time</th><th>User</th><th>OLT</th><th>Action</th><th>Target</th><th>Result</th><th></th></tr></thead><tbody></tbody></table></div>
+{% endblock %}
+{% block scripts %}<script src="/static/audit.js"></script>{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row between">
+  <div><h2>User management</h2><div class="muted small">Create administrator and read-only accounts.</div></div>
+  <button class="primary" id="user-add">Add user</button>
+</div>
+<div class="card scroll">
+  <table><thead><tr><th>Username</th><th>Role</th><th>Created</th><th></th></tr></thead><tbody id="users"></tbody></table>
+</div>
+<dialog id="user-dialog">
+  <form id="user-form" class="stack">
+    <h3 id="user-title">Add user</h3>
+    <label>Username<input name="username" minlength="3" maxlength="60" autocomplete="off" required></label>
+    <label>Password<input name="password" type="password" minlength="5" maxlength="256" autocomplete="new-password" required>
+      <span class="muted small">Use at least 5 characters.</span></label>
+    <label>Role<select name="role"><option value="read_only">Read only — Configured and Diagnostics</option>
+      <option value="administrator">Administrator — full access</option></select></label>
+    <div class="row end"><button type="button" id="user-cancel">Cancel</button><button class="primary">Create user</button></div>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}<script src="/static/users.js"></script>{% endblock %}

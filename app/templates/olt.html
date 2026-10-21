@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+<div><a href="/settings/olts" class="muted small">← Back to OLT list</a><h2 id="olt-title">OLT</h2></div>
+<div class="tabs olt-tabs" id="tabs">
+  <button data-tab="details" class="active">OLT details</button><button data-tab="cards">OLT cards</button>
+  <button data-tab="pon">PON ports</button><button data-tab="uplink">Uplink</button><button data-tab="vlans">VLANs</button>
+  <button data-tab="advanced">Advanced</button>
+</div>
+<section class="card pad tab" id="tab-details"></section>
+<section class="card pad tab" id="tab-cards" hidden></section>
+<section class="card pad tab" id="tab-pon" hidden></section>
+<section class="card pad tab" id="tab-uplink" hidden></section>
+<section class="card pad tab" id="tab-vlans" hidden></section>
+<section class="card pad tab" id="tab-advanced" hidden></section>
+{% endblock %}
+{% block scripts %}<script>window.OLT_ID = {{ olt_id }};</script><script src="/static/olt.js"></script>{% endblock %}

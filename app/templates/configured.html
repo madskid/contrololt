@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="tiles" id="tiles"></section>
+<div class="card pad" id="filters"></div>
+<div class="row between pad"><span id="count" class="muted small"></span><span class="row gap pager"><button class="prev">‹</button><span class="pageinfo small"></span><button class="next">›</button></span></div>
+<div class="card scroll"><table id="onu-table"><thead></thead><tbody></tbody></table></div>
+<div class="row between pad"><span></span><span class="row gap pager"><button class="prev">‹</button><span class="pageinfo small"></span><button class="next">›</button></span></div>
+{% endblock %}
+{% block scripts %}<script>window.LIST_MODE = "configured";</script><script src="/static/onu_list.js"></script>{% endblock %}

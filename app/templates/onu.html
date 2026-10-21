@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div><a id="back" href="/configured" class="muted small">← Back</a><h2 id="onu-title">ONU</h2></div>
+<div class="card pad" id="info"></div>
+<div id="tabs">
+  <div class="tab-actions" aria-label="ONU information">
+    <button class="primary" data-tab="status">Get status</button>
+    <button class="primary" data-tab="config">Show running-config</button>
+    <button class="primary" data-tab="sw">Software info</button>
+    {% if user_role != "read_only" %}
+    <button data-tab="eth">Ethernet ports</button>
+    <button class="live" data-tab="traffic">LIVE!</button>
+    {% endif %}
+  </div>
+  {% if user_role != "read_only" %}
+  <div class="onu-actions" aria-label="ONU actions">
+    <button data-act="reboot">Reboot</button>
+    <button data-act="resync" title="Read this ONU's configuration again from the OLT">Resync config</button>
+    <button data-act="restore">Restore defaults</button>
+    <button data-act="disable">Disable ONU</button>
+    <button data-act="enable">Enable ONU</button>
+    <button data-act="delete" class="danger">Delete</button>
+  </div>
+  {% endif %}
+</div>
+<section id="tab-status" class="tab card pad" hidden></section>
+<section id="tab-config" class="tab card pad" hidden></section>
+<section id="tab-sw" class="tab card pad" hidden></section>
+<section id="tab-traffic" class="tab card pad detail-section" hidden></section>
+<section id="speed-profiles" class="card pad detail-section"></section>
+{% if user_role != "read_only" %}
+<section id="tab-eth" class="tab card pad detail-section" hidden></section>
+<section id="wifi-panel" class="card pad detail-section"></section>
+{% else %}
+<section id="tab-eth" hidden></section><section id="wifi-panel" hidden></section>
+{% endif %}
+{% endblock %}
+{% block scripts %}<script>window.ONU_ID = {{ onu_id }};</script><script src="/static/onu.js"></script>{% endblock %}
