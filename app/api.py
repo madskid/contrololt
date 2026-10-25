@@ -324,6 +324,16 @@ async def onu_status(onu_id: int, summary: bool = Query(False), s: AsyncSession 
     return res
 
 
+@router.get("/onus/{onu_id}/mac")
+async def onu_mac(onu_id: int, s: AsyncSession = Depends(get_session)):
+    onu, _, conn, key = await _onu_ctx(s, onu_id)
+    mac = await _guard(zte.read_onu_mac(conn, key))
+    if mac["ok"] and await sync.store_onu_macs(s, onu.id, mac["rows"]):
+        onu.updated_at = utcnow()
+        await s.commit()
+    return mac
+
+
 @router.get("/onus/{onu_id}/running-config")
 async def onu_running_config(onu_id: int, s: AsyncSession = Depends(get_session)):
     _, _, conn, key = await _onu_ctx(s, onu_id)

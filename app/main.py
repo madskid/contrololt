@@ -11,7 +11,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import text
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import api, api_master, api_users, api_write
+from app import api, api_master, api_moves, api_users, api_write
 from app.config import settings
 from app.db import SessionLocal, engine, init_db, wait_for_db
 from app.drivers import zte
@@ -35,12 +35,13 @@ async def lifespan(app: FastAPI):
     await zte.links.close_all()
 
 
-app = FastAPI(title="ControlOLT Manager", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="ControlOLT Manager", version="1.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 app.include_router(api.router)
 app.include_router(api_master.router)
 app.include_router(api_write.router)
 app.include_router(api_users.router)
+app.include_router(api_moves.router)
 app.include_router(api.ws_router)
 
 

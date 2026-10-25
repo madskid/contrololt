@@ -122,7 +122,7 @@ async def push_speed_profile_to_all_olts(profile_id: int, user: str) -> None:
             prof = zte.profile_for(olt.cli_family)
             list_cmd = prof.tcont_list_cmd if profile_data["direction"] == "upload" else prof.traffic_list_cmd
 
-            async with zte.links.session(conn) as cli:
+            async with zte.links.session(conn, lane="sync") as cli:
                 listed = await cli.run(list_cmd, overall=30, idle=10)
             names = P.parse_profile_names(listed.text) if not listed.error and listed.complete else []
             if not names:
@@ -242,7 +242,7 @@ async def replicate_speed_profiles(source_olt_id: int, profiles: dict) -> None:
             prof = zte.profile_for(olt.cli_family)
             list_cmd = prof.tcont_list_cmd if direction == "upload" else prof.traffic_list_cmd
             try:
-                async with zte.links.session(conn) as cli:
+                async with zte.links.session(conn, lane="sync") as cli:
                     listed = await cli.run(list_cmd, overall=30, idle=10)
                 names = P.parse_profile_names(listed.text) if not listed.error and listed.complete else []
                 if not names:
@@ -324,7 +324,7 @@ async def _read_onu_macs(conn, onus: list[dict]) -> tuple[dict, set[tuple], int]
 
     rows_by_key, scanned, failed = {}, set(), 0
     try:
-        async with zte.links.session(conn, wait=60) as cli:
+        async with zte.links.session(conn, wait=60, lane="sync") as cli:
             for item in onus:
                 key = (item["shelf"], item["slot"], item["pon"], item["onu_number"])
                 cmd = conn.profile.mac_cmd.format(**zte.onu_command_format(conn, key))

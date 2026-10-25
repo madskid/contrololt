@@ -57,6 +57,10 @@ class NamesIn(BaseModel):
     names: list[str] = Field(max_length=5000)
 
 
+class UnconfiguredSerialsIn(BaseModel):
+    sns: list[str] = Field(max_length=5000)
+
+
 @router.get("/zones")
 async def zones(s: AsyncSession = Depends(get_session)):
     cnt = dict((await s.execute(select(ONU.zone_id, func.count()).where(ONU.zone_id.is_not(None))
@@ -697,6 +701,24 @@ async def unconfigured(olt_id: Optional[int] = None, s: AsyncSession = Depends(g
                    "slot": r["slot"], "pon": r["pon"], "sn": r["sn"], "state": r["state"],
                    "model": r.get("model", "")} for r in res["rows"]]
     return {"items": items, "errors": errors, "raw": raw, "scanned": len(olts)}
+
+
+@router.post("/unconfigured/registered")
+async def unconfigured_registered(b: UnconfiguredSerialsIn, s: AsyncSession = Depends(get_session)):
+    serials = {sn.strip().upper() for sn in b.sns if sn and sn.strip()}
+    registered = {}
+    if serials:
+        rows = (await s.execute(
+            select(ONU, OLT.name).join(OLT, OLT.id == ONU.olt_id)
+            .where(func.upper(func.trim(ONU.sn)).in_(serials))
+            .order_by(OLT.name, ONU.slot, ONU.pon, ONU.onu_number)
+        )).all()
+        for onu, olt_name in rows:
+            registered.setdefault(onu.sn.strip().upper(), []).append({
+                "id": onu.id, "olt_id": onu.olt_id, "olt": olt_name, "sn": onu.sn,
+                "name": onu.name, "slot": onu.slot, "pon": onu.pon, "onu_number": onu.onu_number,
+            })
+    return {"registered": registered}
 
 
 # ───────────────────────── Graphs ─────────────────────────

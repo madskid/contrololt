@@ -72,8 +72,10 @@ _ALLOWED = [re.compile(x) for x in [
     r"onu \d{1,3} type \S+ sn [A-Za-z0-9]{8,16}", r"no onu \d{1,3}", r"(?:no )?shutdown",
     r"description [^\x00-\x1f?]{1,64}",
     r"tcont \d+ (?:name \S+ )?profile \S+",
+    r"tcont \d+ gap mode\d+",
     r"gemport \d+ name \S+ (?:tcont \d+|unicast tcont \d+ dir (?:both|upstream|downstream))",
     r"gemport \d+ traffic-limit (?:upstream \S+ )?downstream \S+",
+    r"encrypt \d+ enable downstream",
     r"switchport mode (?:hybrid|trunk|access) vport \d+",
     r"service-port \d+ vport \d+ user-vlan \d+ vlan \d+(?: svlan \d+)?",
     r"service-port \d+ user-vlan \d+ vlan \d+(?: svlan \d+)?",          # C6xx: di interface vport
@@ -81,10 +83,12 @@ _ALLOWED = [re.compile(x) for x in [
     r"service \S+ gemport \d+(?: cos \d+)? vlan \d+",
     r"wan-ip ipv4 mode pppoe username \S+ password \S+ vlan-profile \S+ host \d+",
     r"vlan port eth_\d+/\d+ mode (?:hybrid def-vlan \d+|transparent|tag vlan \d+(?: pri(?:ority)? \d+)?|trunk vlan [\d,\-]+)",
+    r"vlan port veip_\d+ mode hybrid",
     r"no vlan port eth_\d+/\d+ mode", r"no service-port \d+",
     r"flow mode \d+ tag-filter (?:vlan-filter|vid-filter) untag-filter (?:discard|transparent)",
     r"flow \d+ (?:pri|priority) \d+ (?:vlan|vid) \d+", r"gemport \d+ flow \d+", r"switchport-bind switch_\d+/\d+ iphost \d+",
     r"pppoe \d+ nat enable user \S+ password \S+",
+    r"security-mgmt \d+ state enable mode forward protocol web",
     r"onu-vlan iphost \d+ up-mode add (?:up-pri|up-prio) \d+ (?:up-vlan|up-vid) \d+ down-mode transparent",
     r"vlan-filter-mode iphost \d+ tag-filter (?:vlan-filter|vid-filter) untag-filter (?:transparent|discard)",
     r"vlan-filter iphost \d+ (?:pri|priority) \d+ (?:vlan|vid) \d+",
@@ -194,8 +198,8 @@ def plan_register(olt, p: dict, ctx: dict) -> Plan:
     name = text(p.get("name"), "Name", 64) or sn
     vlan = vlan_id(p.get("vlan"), "User VLAN")
     mode = p.get("mode") or "bridge"
-    if mode not in ("bridge", "routing"):
-        raise PlanError("Mode must be bridge or routing")
+    if mode not in ("bridge", "onu_pppoe", "routing"):
+        raise PlanError("Mode must be bridge, onu_pppoe, or routing")
     svc = ident(p.get("service") or "INT", "Service name")
     ul, dl = ctx.get("ul_name"), ctx.get("dl_name")
     if not ul or not dl:
@@ -206,7 +210,13 @@ def plan_register(olt, p: dict, ctx: dict) -> Plan:
     prof = _prof(olt)
     o_if, n_if = _olt_if(olt, slot, pon), prof.onu_if.format(shelf=olt.shelf, slot=slot, pon=pon, onu=n)
     sp = prof.reg_service_port.format(vlan=vlan)
-    onu_cfg = [f"description {name}", prof.reg_tcont.format(svc=svc, ul=ul), prof.reg_gemport.format(svc=svc)]
+    onu_cfg = [f"name {name}", f"description {name}", prof.reg_tcont.format(svc=svc, ul=ul)]
+    if mode == "onu_pppoe":
+        if not prof.reg_encrypt:
+            raise PlanError("This OLT profile does not define the required ONU-PPPoE bridge commands")
+    onu_cfg.append(prof.reg_gemport.format(svc=svc))
+    if mode == "onu_pppoe":
+        onu_cfg.append(prof.reg_encrypt)
     if prof.reg_dl_limit:
         onu_cfg.append(prof.reg_dl_limit.format(dl=dl))
     if prof.reg_hybrid:
@@ -224,6 +234,9 @@ def plan_register(olt, p: dict, ctx: dict) -> Plan:
                      "only the upload profile (tcont) is applied. Set 'reg_dl_limit' in data/profiles.json if your firmware supports it.")
     if mode == "bridge":
         cmds += bridge_lines(svc, vlan, ctx.get("eth_ports"), prof)
+    elif mode == "onu_pppoe":
+        cmds += [prof.reg_service.format(svc=svc, vlan=vlan), prof.reg_veip_bridge]
+        warns.append("Bridge mode: configure PPPoE WAN credentials from the ONU web interface; the OLT only passes the VLAN.")
     else:
         user, pw = pppoe_creds(p)
         if prof.reg_routing_service and prof.reg_pppoe_wan:
@@ -232,6 +245,8 @@ def plan_register(olt, p: dict, ctx: dict) -> Plan:
             cmds += routing_lines(vlan, user, pw, prof=prof)
         warns.append("The routing template follows the PPPoE ONU example in your config; compare it with an existing routing ONU."
                      + (" Template C6xx mengikuti contoh konfigurasi Anda." if prof.vport_if else ""))
+    if prof.reg_web_mgmt:
+        cmds.append(prof.reg_web_mgmt)
     cmds.append("exit")
     if ctx.get("type_unknown"):
         warns.append(f"ONU type '{otype}' is not registered in the dashboard type list; make sure it exists on the OLT (`onu-type`).")
@@ -239,7 +254,8 @@ def plan_register(olt, p: dict, ctx: dict) -> Plan:
         warns.append("Name is truncated to 64 characters for the description.")
     return Plan("register_onu", f"Register ONU {sn}", f"{n_if}", cmds,
                 rollback=[f"interface {o_if}", f"no onu {n}", "exit"], warnings=warns,
-                meta={"number": n, "slot": slot, "pon": pon, "sn": sn, "vlan": vlan, "mode": mode, "name": name})
+                meta={"number": n, "slot": slot, "pon": pon, "sn": sn, "vlan": vlan,
+                      "mode": "bridge" if mode == "onu_pppoe" else mode, "name": name})
 
 
 def _onu_plan(action, title, onu, olt, cmds, dangerous=False, warns=None, meta=None) -> Plan:
@@ -262,7 +278,7 @@ def plan_rename(olt, onu, p, ctx) -> Plan:
         raise PlanError("Name must be 64 characters or fewer to fit the OLT CLI limit")
     name = text(raw_name, "Name", 64, required=True)
     return _onu_plan("rename_onu", f"Rename ONU to {name}", onu, olt,
-                     [f"interface {_onu_if(olt, onu)}", f"name {name}", "exit"])
+                     [f"interface {_onu_if(olt, onu)}", f"name {name}", f"description {name}", "exit"])
 
 
 def plan_restore(olt, onu, p, ctx) -> Plan:
@@ -351,6 +367,21 @@ def plan_onu_mode(olt, onu, p, ctx) -> Plan:
                      meta={"vlan": vlan, "mode": mode, "user": user})
 
 
+def plan_pppoe_credentials(olt, onu, p, ctx) -> Plan:
+    if onu.mode != "routing":
+        raise PlanError("PPPoE credentials can only be updated when the ONU is in routing mode")
+    user, pw = pppoe_creds(p)
+    prof = _prof(olt)
+    if prof.reg_pppoe_wan:
+        command = prof.reg_pppoe_wan.format(
+            user=user, pw=pw, vlan=onu.vlan, vlan_profile=prof.pppoe_vlan_profile)
+    else:
+        command = f"pppoe 1 nat enable user {user} password {pw}"
+    return _onu_plan("pppoe_credentials", "Update PPPoE credentials", onu, olt,
+                     [f"pon-onu-mng {_onu_if(olt, onu)}", command, "exit"],
+                     meta={"user": user})
+
+
 def plan_apply_speed(olt, onu, p, ctx) -> Plan:
     if not ctx.get("ul_name") or not ctx.get("dl_name"):
         raise PlanError("Select download and upload speed profiles")
@@ -416,7 +447,7 @@ def plan_push_speed(olt, onu, p, ctx) -> Plan:
 
 ONU_ACTIONS = {"delete_onu": plan_delete, "reboot_onu": plan_reboot, "restore_onu": plan_restore, "disable_onu": plan_admin(False),
                "enable_onu": plan_admin(True), "eth_state": plan_eth, "eth_config": plan_eth_config, "onu_mode": plan_onu_mode,
-               "apply_speed": plan_apply_speed, "rename_onu": plan_rename}
+               "pppoe_credentials": plan_pppoe_credentials, "apply_speed": plan_apply_speed, "rename_onu": plan_rename}
 OLT_ACTIONS = {"vlan_add": plan_vlan_add, "uplink_vlan": plan_uplink_vlan, "push_speed": plan_push_speed}
 
 

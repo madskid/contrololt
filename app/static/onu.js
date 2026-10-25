@@ -1,5 +1,5 @@
 const id = window.ONU_ID, loaded = {};
-let timer = null, last = null, series = {in: [], out: []}, signalSeries = [];
+let timer = null, last = null, series = {in: [], out: []}, signalSeries = [], statusRequest = 0;
 let headerRxWarn = -30, headerRxCrit = -32;
 const fmtBps = v => v == null ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + " Gbps" : v >= 1e6 ? (v / 1e6).toFixed(2) + " Mbps" : v >= 1e3 ? (v / 1e3).toFixed(1) + " kbps" : v + " bps";
 const dbm = v => v == null ? "—" : v.toFixed(2) + " dBm";
@@ -71,10 +71,10 @@ async function header() {
     <label><span>Mgmt IP</span>${o.mgmt_ip ? esc(o.mgmt_ip) + " (vlan " + o.mgmt_vlan + ")" : "—"}</label>
     <label><span>ONU</span>${esc(o.interface)}</label>
     <label><span>ONU mode</span><b>${o.mode === "routing" ? "Routing" : o.mode === "bridge" ? "Bridging" : "—"}${o.mode === "routing" && o.vlan ? " - WAN VLAN: " + o.vlan : ""}</b> ${editable ? '<button type="button" class="sm" id="b-mode">Update ONU mode</button>' : ""}</label>
-    <label><span>SN</span>${esc(o.sn)}</label>
+    <label><span>SN</span>${esc(o.sn)} ${editable ? '<button type="button" class="sm" id="b-replace-sn">Replace SN</button>' : ""}</label>
     <label><span>WAN setup mode</span>${esc((o.conn_type || "—").toUpperCase())}</label>
     <label><span>ONU type</span>${esc(o.onu_type)}</label>
-    <label><span>PPPoE username</span><code id="pu" data-u="${esc(o.pppoe_user)}">${o.pppoe_user ? "••••••••••" : "—"}</code> <button type="button" class="sm" id="eye">👁</button></label>
+    <label><span>PPPoE username</span><code id="pu" data-u="${esc(o.pppoe_user)}">${o.pppoe_user ? "••••••••••" : "—"}</code> <button type="button" class="sm" id="eye">👁</button> ${editable && o.mode === "routing" ? '<button type="button" class="sm" id="b-pppoe">Edit credentials</button>' : ""}</label>
     <label><span>Zone</span>${editable ? `<select id="e-zone">${opt(f.zones, o.zone_id)}</select>` : esc(o.zone || "—")}</label>
     <label><span>ODB (Splitter)</span>${editable ? `<select id="e-odb">${opt(f.odbs, o.odb_id)}</select>` : esc(o.odb || "—")}</label>
     <label><span>Name</span>${editable ? `<input id="e-name" maxlength="64" value="${esc(o.name)}">` : esc(o.name || "—")}</label>
@@ -104,6 +104,32 @@ async function header() {
     <p class="small muted">Radio status, SSID, DHCP, and WiFi configuration are not available through the current OLT integration.</p>`;
   if ($("#eye")) $("#eye").onclick = () => { const p = $("#pu"); p.textContent = p.textContent.includes("•") ? (p.dataset.u || "—") : (p.dataset.u ? "••••••••••" : "—"); };
   if (!editable) return;
+  $("#b-replace-sn").onclick = async buttonEvent => {
+    const button = buttonEvent.currentTarget;
+    const values = await askForm({title: "Replace ONU serial number", submit: "Continue",
+      note: `The new ONU must be detected as unconfigured on ${o.olt.name}, board ${o.slot}, PON ${o.pon}. The current bridge service will be applied there, then the old registration removed. The dashboard SN and external ID will both be changed.`,
+      fields: [{k: "sn", label: "New ONU SN"}]});
+    if (!values) return;
+    const newSn = values.sn.trim().toUpperCase();
+    if (!confirm(`Replace ONU SN ${o.sn} with ${newSn} at ${o.olt.name} ${o.slot}/${o.pon}? The old ONU registration will be removed after the new configuration is verified.`)) return;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/onus/${id}/replace-sn`, {method: "POST", body: {sn: newSn, confirm: true}});
+      toast(`ONU replaced: ${result.old_sn} → ${result.sn}; external ID updated.`);
+      await header();
+    } catch (error) {
+      toast(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  if ($("#b-pppoe")) $("#b-pppoe").onclick = async () => {
+    const v = await askForm({title: "Update PPPoE credentials", submit: "Update", fields: [
+      {k: "username", label: "Username", value: o.pppoe_user || ""},
+      {k: "password", label: "Password", type: "password", note: "Sent to the OLT; not stored in the dashboard."}]});
+    if (v) executeAction({action: "pppoe_credentials", onu_id: id, params: v,
+      title: "PPPoE credentials update", button: $("#b-pppoe"), onDone: () => header()});
+  };
   $("#b-mode").onclick = async () => {
     const vl = await api(`/api/olts/${o.olt.id}/vlans`);
     const opts = vl.rows.filter(v => v.vlan > 1 && (v.name || v.onus)).map(v => [v.vlan, `${v.vlan}${v.name ? " - " + v.name : ""}`]);
@@ -149,24 +175,20 @@ async function header() {
     try {
       await save();
       toast("Saved"); $("#onu-title").textContent = $("#e-name").value || o.sn;
-    } catch (e) { toast(e.message, true); }
+    } catch (e) { toast(e.message, true);     }
   };
+  refreshHeaderStatus().catch(e => toast(`Live status refresh failed: ${e.message}`, true));
 }
 function loading(el, msg = "Retrieving data from OLT…") { el.innerHTML = `<p class="muted">${msg}</p>`; }
 function failed(el, e, retry) { el.innerHTML = `<p class="err">${esc(e.message)}</p><button class="sm" id="retry">Retry</button>`; $("#retry", el).onclick = retry; }
 
 async function tabStatus() {
   const el = $("#tab-status"); loading(el);
+  const request = ++statusRequest;
   try {
-    const r = await api(`/api/onus/${id}/status`), o = r.optical;
+    const r = await api(`/api/onus/${id}/status?summary=true`), o = r.optical;
     updateHeaderStatus(r.status, r.phase_state, o);
     const kv = Object.entries(r.fields).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
-    const mac = r.mac || {rows: [], ok: false};
-    const macHtml = `<h4 class="slot">MAC address <span class="muted small">(ONT &amp; connected devices — <code>${esc(mac.command || "show mac gpon onu")}</code>)</span></h4>` +
-      (mac.rows.length ? `<table><thead><tr><th>MAC address</th><th>VLAN</th><th>Type</th><th>Details</th></tr></thead><tbody>${mac.rows.map(m =>
-          `<tr><td><code class="mac">${esc(m.mac)}</code></td><td>${m.vlan ?? "—"}</td><td>${esc(m.type) || "—"}</td><td class="muted">${esc(m.info) || "—"}</td></tr>`).join("")}</tbody></table>`
-        : mac.ok ? '<p class="muted">No MAC addresses detected (ONU offline or no traffic yet).</p>'
-        : '<p class="err">The OLT rejected the MAC command — syntax may differ in your firmware (change <code>mac_cmd</code> in data/profiles.json).</p>');
     el.innerHTML = `<div class="row between"><b>${esc(r.interface)}</b><button class="sm" id="r1">Refresh</button></div>
     <div class="big">
       <div class="tile"><b>${badge(r.status)}</b><span>Phase: ${esc(r.phase_state || "—")}</span></div>
@@ -178,11 +200,32 @@ async function tabStatus() {
     </div>
     ${r.status === "unknown" ? '<p class="err">Could not read the phase state from OLT output — see the raw output below.</p>' : ""}
     ${kv ? `<dl class="kv">${kv}</dl>` : ""}
-    ${macHtml}
+    <section id="status-mac"><h4 class="slot">MAC address</h4><p class="muted small">Loading MAC table…</p></section>
     ${r.history && r.history.length ? `<h4 class="slot">ONU history (last 10)</h4><table><thead><tr><th>#</th><th>Authpass</th><th>Offline</th><th>Cause</th></tr></thead><tbody>${r.history.map(h => `<tr><td>${h.n}</td><td>${esc(h.authpass)}</td><td>${h.offline ? esc(h.offline) : '<span class="muted">online now</span>'}</td><td>${esc(h.cause) || "—"}</td></tr>`).join("")}</tbody></table>` : ""}
-    <details ${kv ? "" : "open"}><summary>Raw OLT output</summary>${pre(r.raw.detail)}${pre(r.raw.attenuation)}${pre(mac.raw)}</details>`;
+    <details ${kv ? "" : "open"}><summary>Raw OLT output</summary>${pre(r.raw.detail)}${pre(r.raw.attenuation)}<div id="status-mac-raw"></div></details>`;
     $("#r1").onclick = tabStatus;
+    requestAnimationFrame(() => loadStatusMac(request));
   } catch (e) { failed(el, e, tabStatus); }
+}
+
+async function loadStatusMac(request) {
+  const section = $("#status-mac");
+  if (!section || request !== statusRequest) return;
+  try {
+    const mac = await api(`/api/onus/${id}/mac`);
+    if (request !== statusRequest || !$("#status-mac")) return;
+    const rows = mac.rows.length
+      ? `<table><thead><tr><th>MAC address</th><th>VLAN</th><th>Type</th><th>Details</th></tr></thead><tbody>${mac.rows.map(m =>
+          `<tr><td><code class="mac">${esc(m.mac)}</code></td><td>${m.vlan ?? "—"}</td><td>${esc(m.type) || "—"}</td><td class="muted">${esc(m.info) || "—"}</td></tr>`).join("")}</tbody></table>`
+      : mac.ok ? '<p class="muted">No MAC addresses detected (ONU offline or no traffic yet).</p>'
+        : '<p class="err">The OLT rejected the MAC command — syntax may differ in your firmware (change <code>mac_cmd</code> in data/profiles.json).</p>';
+    section.innerHTML = `<h4 class="slot">MAC address <span class="muted small">(ONT &amp; connected devices — <code>${esc(mac.command || "show mac gpon onu")}</code>)</span></h4>${rows}`;
+    $("#status-mac-raw").innerHTML = pre(mac.raw);
+  } catch (e) {
+    if (request === statusRequest && $("#status-mac")) {
+      section.innerHTML = `<h4 class="slot">MAC address</h4><p class="err">${esc(e.message)}</p>`;
+    }
+  }
 }
 
 onEvent(m => {

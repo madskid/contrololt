@@ -31,6 +31,25 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}td.wrap{white-space:no
 dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);width:min(720px,94vw);padding:1.2rem}
 dialog::backdrop{background:#0008}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:.7rem}
 @media(max-width:640px){.grid2{grid-template-columns:1fr}}
+#reg-dialog{width:min(760px,94vw);max-height:calc(100vh - 2rem);max-height:calc(100dvh - 2rem);overflow-y:auto}
+#reg-form{gap:.85rem}
+#reg-form [hidden]{display:none!important}
+#reg-form .reg-summary{line-height:1.8}
+#reg-form .reg-section{border-top:1px solid var(--line);padding-top:.65rem}
+#reg-form .reg-section h4{margin:0 0 .55rem;font-size:13px;color:var(--fg)}
+#reg-form .grid2{gap:.7rem 1rem}
+#reg-form label{font-size:13px;min-width:0}
+#reg-form input,#reg-form select{width:100%;min-width:0;min-height:42px}
+#reg-form .row select{flex:1;min-width:0}
+#reg-form .wide{grid-column:1/-1}
+#reg-form .reg-notice,#move-form .reg-notice{padding:.6rem .75rem;border:1px solid color-mix(in srgb,var(--pri) 25%,var(--line));border-radius:7px;background:color-mix(in srgb,var(--pri) 5%,var(--card));color:var(--muted);font-size:12px}
+#reg-form .reg-actions{position:sticky;bottom:-1.2rem;margin:0 -1.2rem -1.2rem;padding:.75rem 1.2rem 1.2rem;background:var(--card);border-top:1px solid var(--line);z-index:1}
+.move-warning{display:grid;gap:.3rem;border-left:4px solid var(--warn)}
+.move-search-results{display:grid;gap:.35rem;max-height:220px;overflow:auto}
+.move-result{display:block;text-align:left;white-space:normal}
+.move-result .muted{font-size:12px}
+.move-selected{padding:.6rem .75rem;border:1px solid var(--line);border-radius:7px;background:var(--bg)}
+.move-selected[hidden]{display:none}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok);display:inline-block}.dot.off{background:var(--gray)}
 .tabs{display:flex;gap:.3rem;margin:.6rem 0 0}.tabs button{border-radius:8px 8px 0 0;border-bottom:0}.tabs button.active{background:var(--pri);color:#fff;border-color:var(--pri)}
 pre.out{background:#0b0f17;color:#cfe3ff;padding:.8rem;border-radius:8px;overflow:auto;max-height:520px;font:12px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre}
@@ -43,7 +62,7 @@ details{margin-top:.8rem}summary{cursor:pointer;color:var(--muted)}canvas{width:
 /* ── navbar & komponen v2 ── */
 .top nav a.on,.top nav button.on{font-weight:800;color:var(--head-text);border-bottom-color:#fff}.top nav a,.top nav button.link{color:var(--head-text)}
 .dd{position:relative}.dd .menu{display:none;position:absolute;top:100%;left:0;background:var(--card);border:1px solid var(--line);border-radius:8px;min-width:170px;padding:.3rem;z-index:10;box-shadow:0 6px 18px #0003}
-.dd:hover .menu,.dd:focus-within .menu{display:block}.dd .menu a{display:block;padding:.4rem .7rem;color:var(--fg);border-radius:6px}.dd .menu a:hover{background:var(--bg)}
+.dd.open .menu,.dd:hover .menu,.dd:focus-within .menu{display:block}.dd .menu a{display:block;padding:.4rem .7rem;color:var(--fg);border-radius:6px}.dd .menu a:hover{background:var(--bg)}
 .filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.6rem;align-items:end}.filters .wide{grid-column:span 2}
 .seg{display:inline-flex;flex-wrap:nowrap;white-space:nowrap;width:max-content;max-width:100%}.seg button{white-space:nowrap}.seg button{border-radius:0;margin-left:-1px;padding:.35rem .6rem}.seg button:first-child{border-radius:7px 0 0 7px;margin-left:0}.seg button:last-child{border-radius:0 7px 7px 0}
 .seg button.on{background:var(--pri);border-color:var(--pri);color:#fff}.seg button[disabled]{opacity:.4}
@@ -69,6 +88,7 @@ h4.slot{margin:.8rem 0 .3rem}
 #wifi-panel p{margin:.3rem 0}
 @media(max-width:680px){.traffic-signal-grid{grid-template-columns:minmax(0,1fr)}}
 
+
 /* filter Status/Signal: baris sendiri (flex-wrap) supaya tidak menimpa kolom lain di grid */
 .filters-bar{display:flex;flex-wrap:wrap;align-items:flex-end;gap:.7rem 1.4rem;margin-top:.8rem}
 .filters-bar .push{margin-left:auto;align-self:flex-end}
@@ -84,7 +104,13 @@ code.mac{font-variant-numeric:tabular-nums;letter-spacing:.02em}
 .top button.link{background:none;border:0;padding:.5rem 0;font:inherit;font-weight:600}
 .top .dot{box-shadow:0 0 0 2px #fff6}
 .top form.inline button.link::before{content:"⏻ ";}
-.dd .menu{background:#fff;border:1px solid var(--line);box-shadow:0 8px 20px #0003;text-shadow:none;top:calc(100% + 5px);left:auto;right:0;min-width:220px;padding:.4rem}
+.top{gap:.55rem;flex-wrap:nowrap;overflow:visible;white-space:nowrap}
+.top>*{flex-shrink:0}
+.top nav{gap:.65rem;flex-shrink:0;flex-wrap:nowrap}
+.top nav a,.top nav button.link{font-size:14px;white-space:nowrap}
+.top .brand{font-size:18px}
+.top #ws-text,.top form{white-space:nowrap}
+.dd .menu{background:#fff;border:1px solid var(--line);box-shadow:0 8px 20px #0003;text-shadow:none;top:100%;left:auto;right:0;min-width:220px;padding:.4rem}
 .dd .menu a{color:var(--fg);text-shadow:none;font-weight:500;border:0;padding:.55rem .8rem;white-space:nowrap}.dd .menu a:hover{background:#fff1e6;color:#9a3412}
 main{padding-top:1.2rem}
 
@@ -136,7 +162,7 @@ body.center .login{border:0;box-shadow:0 12px 40px #0006}
 
 /* lencana status di dalam tile/infogrid tidak boleh ikut aturan span (warna redup / lebar 130px) */
 .tile .badge,.infogrid .badge{color:#fff;font-size:12px;width:auto;flex:none;text-align:center}
-@media(max-width:1100px){.top{flex-wrap:wrap;padding:.5rem 1rem;gap:.25rem .8rem}.top nav{order:3;width:100%;flex-wrap:wrap;gap:.15rem 1rem}.top .grow{display:none}}
+@media(max-width:1180px){.top{padding:0 1rem}.top nav{flex:1;justify-content:flex-start}.top .grow{display:none}}
 @media(max-width:760px){#tabs{grid-template-columns:1fr}.onu-actions{justify-content:flex-start!important}}
 @media(max-width:900px){#tabs.olt-tabs{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:480px){#tabs.olt-tabs{grid-template-columns:repeat(2,minmax(0,1fr))}}

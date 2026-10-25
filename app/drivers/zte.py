@@ -11,6 +11,7 @@ import re
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, fields, replace
+from typing import Literal
 
 from app.config import DATA_DIR, settings
 from app.drivers import zte_parsers as P
@@ -58,10 +59,13 @@ class Profile:
     reg_tcont: str = "tcont 1 name {svc} profile {ul}"
     reg_gemport: str = "gemport 1 name {svc} tcont 1"
     reg_dl_limit: str = "gemport 1 traffic-limit downstream {dl}"     # Empty = not sent.
+    reg_encrypt: str = "encrypt 1 enable downstream"
     reg_hybrid: str = "switchport mode hybrid vport 1"                # Empty = not sent.
     reg_service_port: str = "service-port 1 vport 1 user-vlan {vlan} vlan {vlan}"
     reg_service: str = "service {svc} gemport 1 vlan {vlan}"          # `service` line in pon-onu-mng.
     reg_eth_bridge: str = "vlan port eth_0/{i} mode hybrid def-vlan {vlan}"
+    reg_veip_bridge: str = "vlan port veip_1 mode hybrid"
+    reg_web_mgmt: str = "security-mgmt 212 state enable mode forward protocol web"
     reg_routing_filter: str = "vlan-filter"
     reg_routing_priority_keyword: str = "pri"
     reg_routing_vlan_keyword: str = "vlan"
@@ -203,10 +207,10 @@ class _Link:
 
 
 class LinkRegistry:
-    """Satu sesi telnet persisten per OLT (CLI OLT praktis serial) + batas konkurensi global."""
+    """Persistent Telnet sessions per OLT and workload lane, with a global concurrency limit."""
 
     def __init__(self) -> None:
-        self._links: dict[int, _Link] = {}
+        self._links: dict[tuple[int, str], _Link] = {}
         self._sem: asyncio.Semaphore | None = None
 
     def reset(self) -> None:
@@ -219,8 +223,9 @@ class LinkRegistry:
         return self._sem
 
     @asynccontextmanager
-    async def session(self, conn: OltConn, wait: float = 60):
-        link = self._links.setdefault(conn.id, _Link())
+    async def session(self, conn: OltConn, wait: float = 60,
+                      lane: Literal["config", "poll", "check", "sync"] = "config"):
+        link = self._links.setdefault((conn.id, lane), _Link())
         try:
             await asyncio.wait_for(link.lock.acquire(), wait)
         except asyncio.TimeoutError:
@@ -250,22 +255,25 @@ class LinkRegistry:
             link.lock.release()
 
     async def close_all(self) -> None:
-        for olt_id in list(self._links):
+        for olt_id in {key[0] for key in self._links}:
             await self.drop(olt_id)
 
     async def drop(self, olt_id: int) -> None:
-        link = self._links.pop(olt_id, None)
-        if link and link.tel:
-            await link.tel.close()
+        keys = [key for key in self._links if key[0] == olt_id]
+        for key in keys:
+            link = self._links.pop(key, None)
+            if link and link.tel:
+                await link.tel.close()
 
     async def janitor(self) -> None:
         while True:
             await asyncio.sleep(30)
             now = time.monotonic()
-            for link in list(self._links.values()):
+            for key, link in list(self._links.items()):
                 if link.tel and not link.lock.locked() and now - link.last_used > settings.telnet_idle_close:
                     async with link.lock:
-                        if link.tel and time.monotonic() - link.last_used > settings.telnet_idle_close:
+                        if (self._links.get(key) is link and link.tel
+                                and time.monotonic() - link.last_used > settings.telnet_idle_close):
                             await link.tel.close()
                             link.tel = None
 
@@ -299,7 +307,7 @@ async def probe(conn: OltConn) -> dict:
             finally:
                 await tel.close()
         else:
-            async with links.session(conn, wait=20):
+            async with links.session(conn, wait=20, lane="check"):
                 pass
         res["telnet_ok"], res["telnet_msg"] = True, "Telnet login OK"
     except (TelnetError, BusyError, OSError, asyncio.TimeoutError) as exc:
@@ -327,13 +335,13 @@ async def _read_types(cli, prof: Profile) -> dict:
 
 
 async def read_onu_types(conn: OltConn) -> dict:
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         return await _read_types(cli, conn.profile)
 
 
 async def read_config_and_states(conn: OltConn) -> ConfigRead:
     prof = conn.profile
-    async with links.session(conn, wait=300) as cli:
+    async with links.session(conn, wait=300, lane="sync") as cli:
         cfg = await cli.run("show running-config", overall=900, idle=45)
         if cfg.error or not cfg.text.strip():
             raise TelnetError("show running-config failed: " + (cfg.text.strip()[:120] or "empty output"))
@@ -448,7 +456,7 @@ async def poll_cli_states(conn: OltConn, ports: list[tuple] | None = None) -> di
     """Read status for all ONUs via CLI. If `show gpon onu state` without arguments is rejected/empty (some C6xx
     firmware requires a port argument), retry per PON from `ports` [(shelf, slot, pon)]."""
     prof = conn.profile
-    async with links.session(conn, wait=60) as cli:
+    async with links.session(conn, wait=60, lane="poll") as cli:
         r = await cli.run(prof.state_cmd, overall=180, idle=30)
         if not r.complete:
             raise TelnetError("Global ONU status command did not complete (OLT prompt not received)")
@@ -469,7 +477,7 @@ async def poll_cli_states(conn: OltConn, ports: list[tuple] | None = None) -> di
 
 async def poll_cli_rx(conn: OltConn, ports: list[tuple]) -> dict[Key, tuple]:
     prof, out = conn.profile, {}
-    async with links.session(conn, wait=60) as cli:
+    async with links.session(conn, wait=60, lane="poll") as cli:
         for shelf, slot, pon in ports:
             r = await cli.run(prof.rx_cmd_port.format(olt_if=olt_if(conn, shelf, slot, pon)), overall=60, idle=20)
             if not r.error:
@@ -479,7 +487,7 @@ async def poll_cli_rx(conn: OltConn, ports: list[tuple]) -> dict[Key, tuple]:
 
 async def onu_status(conn: OltConn, key: Key, include_mac: bool = True) -> dict:
     prof, fmt = conn.profile, onu_command_format(conn, key)
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         d = await cli.run(prof.detail_cmd.format(**fmt), overall=30, idle=15)
         a = await cli.run(prof.atten_cmd.format(**fmt), overall=30, idle=15)
         m = None
@@ -502,13 +510,25 @@ async def onu_status(conn: OltConn, key: Key, include_mac: bool = True) -> dict:
             "error": d.error and a.error}
 
 
+async def read_onu_mac(conn: OltConn, key: Key) -> dict:
+    prof = conn.profile
+    if not prof.mac_cmd:
+        return {"ok": False, "total": 0, "rows": [], "command": "", "raw": ""}
+    command = prof.mac_cmd.format(**onu_command_format(conn, key))
+    async with links.session(conn, wait=30, lane="check") as cli:
+        result = await cli.run(command, overall=30, idle=15)
+    rows = P.parse_mac_table(result.text) if not result.error else []
+    return {"ok": not result.error, "total": len(rows), "rows": rows,
+            "command": command, "raw": result.text}
+
+
 async def onu_text(conn: OltConn, key: Key, kind: str) -> dict:
     """config: combine `show running-config interface` and `show onu running config` (interface and pon-onu-mng sections).
     sw: first successful command."""
     prof = conn.profile
     cmds = prof.cfg_cmds if kind == "config" else prof.sw_cmds
     done, outs, last = [], [], None
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         for tpl in cmds:
             cmd = tpl.format(onu_if=onu_if(conn, key), vport_if=vport_if(prof, *key))
             r = await cli.run(cmd, overall=30, idle=15)
@@ -529,7 +549,7 @@ async def read_onu_cfg(conn: OltConn, key: Key) -> str:
 
 async def read_eth(conn: OltConn, key: Key) -> dict:
     """ONU Ethernet port status and per-port VLAN mode (from `vlan port` in pon-onu-mng configuration)."""
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         r = await cli.run(conn.profile.eth_cmd.format(onu_if=onu_if(conn, key)), overall=30, idle=15)
         c = await cli.run(conn.profile.mng_cfg_cmd.format(onu_if=onu_if(conn, key)), overall=30, idle=15)
     modes = P.parse_eth_modes(c.text) if not c.error else {}
@@ -543,7 +563,7 @@ async def read_eth(conn: OltConn, key: Key) -> dict:
 async def read_diag(conn: OltConn) -> list[dict]:
     """Raw output from OLT health commands (unverified format -> displayed as-is)."""
     out = []
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         for cmd in conn.profile.diag_cmds:
             r = await cli.run(cmd, overall=20, idle=10)
             out.append({"command": cmd, "ok": not r.error, "output": r.text})
@@ -553,7 +573,7 @@ async def read_diag(conn: OltConn) -> list[dict]:
 async def read_optical(conn: OltConn, ports: list[str]) -> dict[str, dict]:
     """Uplink optical module Rx/Tx/temperature/wavelength (`show interface optical-module-info`). Copper ports are skipped."""
     res = {}
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         for port in ports:
             r = await cli.run(conn.profile.optical_cmd.format(port=port), overall=15, idle=8)
             if not r.error:
@@ -573,7 +593,7 @@ async def onu_traffic(conn: OltConn, key: Key) -> dict:
         return hit[1]
     prof = conn.profile
     last = None
-    async with links.session(conn, wait=15) as cli:
+    async with links.session(conn, wait=15, lane="check") as cli:
         for tpl in prof.traffic_cmds:
             cmd = tpl.format(onu_if=onu_if(conn, key))
             r = await cli.run(cmd, overall=15, idle=8)
@@ -591,20 +611,20 @@ async def onu_traffic(conn: OltConn, key: Key) -> dict:
 
 async def save_config(conn: OltConn) -> tuple[bool, str]:
     prof = conn.profile
-    async with links.session(conn, wait=120) as cli:
+    async with links.session(conn, wait=120, lane="config") as cli:
         r = await cli.run(prof.save_cmd, overall=180, idle=90)
     ok = r.complete and not r.error
     return ok, (r.text.strip().replace("\n", " ")[:250] or "OK")
 
 
 async def read_cards(conn: OltConn) -> dict:
-    async with links.session(conn, wait=30) as cli:
+    async with links.session(conn, wait=30, lane="check") as cli:
         r = await cli.run(conn.profile.cards_cmd, overall=30, idle=10)
     return {"rows": P.parse_cards(r.text) if not r.error else [], "raw": r.text, "ok": not r.error}
 
 
 async def scan_uncfg(conn: OltConn) -> dict:
-    async with links.session(conn, wait=180) as cli:
+    async with links.session(conn, wait=180, lane="check") as cli:
         prof = conn.profile
         r = await cli.run(prof.uncfg_cmd, overall=60, idle=15)
         rows = P.parse_uncfg(r.text) if not r.error else []

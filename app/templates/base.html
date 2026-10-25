@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}ControlOLT Manager{% endblock %}</title>
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/app.css?v=20261025-5">
 </head>
 <body>
 <header class="top">
@@ -16,7 +16,7 @@
     {% if user_role != "read_only" %}
     <a href="/graphs" class="{{ 'on' if active == 'graphs' }}">Graphs</a>
     <a href="#" id="nav-save">Save config</a>
-    <div class="dd"><button class="link {{ 'on' if active == 'settings' }}">Settings ▾</button>
+    <div class="dd"><button type="button" class="link {{ 'on' if active == 'settings' }}" aria-expanded="false">Settings ▾</button>
       <div class="menu">
         <a href="/settings/olts">OLTs</a><a href="/settings/zones">Zones</a>
         <a href="/settings/speed-profiles">Speed profiles</a><a href="/settings/onu-types">ONU types</a><a href="/settings/audit">Audit log</a>
@@ -30,7 +30,7 @@
   <form method="post" action="/logout" class="inline"><button class="link">Log out ({{ user }})</button></form>
 </header>
 <main>{% block content %}{% endblock %}</main>
-<footer class="foot">ControlOLT Manager v1</footer>
+<footer class="foot">ControlOLT Manager v1.1</footer>
 <dialog id="plan-dialog"></dialog>
 <div id="toast"></div>
 <script src="/static/app.js"></script>

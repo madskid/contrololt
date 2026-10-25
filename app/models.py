@@ -189,6 +189,33 @@ class AuditLog(Base):
     output: Mapped[str] = mapped_column(Text, default="")
 
 
+class OnuMoveJob(Base):
+    """Persistent ONU move schedule; configuration snapshot excludes PPPoE passwords."""
+    __tablename__ = "onu_move_jobs"
+    __table_args__ = (Index("ix_onu_move_due", "status", "scheduled_at"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_onu_id: Mapped[int] = mapped_column(Integer, index=True)
+    source_olt_id: Mapped[int] = mapped_column(Integer)
+    source_shelf: Mapped[int] = mapped_column(Integer)
+    source_slot: Mapped[int] = mapped_column(Integer)
+    source_pon: Mapped[int] = mapped_column(Integer)
+    source_onu_number: Mapped[int] = mapped_column(Integer)
+    target_olt_id: Mapped[int] = mapped_column(Integer)
+    target_slot: Mapped[int] = mapped_column(Integer)
+    target_pon: Mapped[int] = mapped_column(Integer)
+    sn: Mapped[str] = mapped_column(String(32))
+    config_snapshot: Mapped[str] = mapped_column(Text, default="{}")
+    dashboard_snapshot: Mapped[str] = mapped_column(Text, default="{}")
+    created_by: Mapped[str] = mapped_column(String(60), default="")
+    status: Mapped[str] = mapped_column(String(16), default="scheduled", index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    result: Mapped[str] = mapped_column(Text, default="")
+
+
 class User(Base):
     __tablename__ = "users"
 
