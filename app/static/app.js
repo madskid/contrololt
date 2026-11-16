@@ -78,3 +78,18 @@ if (navSave) navSave.onclick = async e => {
     toast(bad.length ? `Failed on ${bad.length} OLT(s): ${bad.map(x => x.olt).join(", ")}` : `Config saved on ${r.results.length} OLT(s)`, bad.length > 0);
   } catch (err) { toast(err.message, true); }
 };
+
+const settingsDropdown = $(".dd");
+const settingsButton = $(".dd > button");
+if (settingsDropdown && settingsButton) {
+  settingsButton.onclick = () => {
+    const open = settingsDropdown.classList.toggle("open");
+    settingsButton.setAttribute("aria-expanded", String(open));
+  };
+  document.addEventListener("click", e => {
+    if (!settingsDropdown.contains(e.target)) {
+      settingsDropdown.classList.remove("open");
+      settingsButton.setAttribute("aria-expanded", "false");
+    }
+  });
+}

@@ -28,8 +28,19 @@ function addChart(title, series, unit) {
   $("#grid").appendChild(d); lineChart($("canvas", d), series, unit);
 }
 const get = async metric => (await api(`/api/graphs?olt_id=${$("#olt").value}&metric=${metric}&hours=${$("#hours").value}`)).series;
-const isPon = n => /^gpon[-_]olt/i.test(n);
+const isPon = n => /^gpon(?:[-_]olt[-_]\S+|_\d+\/\d+\/\d+)$/i.test(n);
 const portNum = n => (String(n).match(/\d+/g) || []).join("/");     // gpon-olt_1/2/3 (C300) dan gpon_olt-1/2/3 (C600) -> "1/2/3"
+const ponLabel = n => {
+  const parts = String(n).match(/\d+/g) || [];
+  return parts.length >= 2 ? `PON ${parts.slice(-2).join("/")}` : n;
+};
+function updateQuery() {
+  Q.set("tab", tab);
+  if ($("#olt").value) Q.set("olt", $("#olt").value);
+  else Q.delete("olt");
+  if (tab !== "uplink") Q.delete("key");
+  history.replaceState(null, "", `${location.pathname}${Q.size ? `?${Q}` : ""}`);
+}
 
 async function render() {
   const grid = $("#grid"); grid.innerHTML = "";
@@ -51,8 +62,11 @@ async function render() {
         ev.target.disabled = false; };
     } else if (tab === "uplink" || tab === "pon") {
       const [i, o] = await Promise.all([get("if_in"), get("if_out")]);
-      const want = Q.get("key"), names = [...new Set([...Object.keys(i), ...Object.keys(o)])].filter(n => isPon(n) === (tab === "pon") && (!want || portNum(n) === portNum(want))).sort(natural);
-      names.forEach(n => addChart(n, [{name: "In", pts: i[n] || []}, {name: "Out", pts: o[n] || []}], "bps"));
+      const available = [...new Set([...Object.keys(i), ...Object.keys(o)])].filter(n => isPon(n) === (tab === "pon")).sort(natural);
+      const want = tab === "uplink" ? Q.get("key") : "";
+      const names = available.filter(n => !want || portNum(n) === portNum(want));
+      names.forEach(n => addChart(tab === "pon" ? `${ponLabel(n)} — traffic` : n,
+        [{name: "In", pts: i[n] || []}, {name: "Out", pts: o[n] || []}], "bps"));
       if (!names.length) grid.innerHTML = '<div class="card pad muted">No data yet. Make sure SNMP is enabled; the first sample appears after about 5–10 minutes.</div>';
     } else if (tab === "traffic") {
       const [i, o] = await Promise.all([get("if_in"), get("if_out")]);
@@ -69,12 +83,15 @@ async function render() {
     }
   } catch (e) { grid.innerHTML = `<div class="card pad err">${esc(e.message)}</div>`; }
 }
-$("#tabs").onclick = e => { const b = e.target.closest("button[data-t]"); if (!b) return; tab = b.dataset.t; Q.delete("key");
-  $$("#tabs button").forEach(x => x.classList.toggle("on", x === b)); render(); };
-$("#olt").onchange = () => { Q.delete("key"); render(); }; $("#hours").onchange = render;
+$("#graph-tabs").onclick = e => { const b = e.target.closest("button[data-t]"); if (!b) return; tab = b.dataset.t; Q.delete("key");
+  $$("#graph-tabs button").forEach(x => x.classList.toggle("on", x === b)); updateQuery(); render(); };
+$("#olt").onchange = () => { Q.delete("key"); updateQuery(); render(); }; $("#hours").onchange = render;
 addEventListener("resize", debounce(render, 400));
 (async () => {
-  const f = await api("/api/filters"); $("#olt").innerHTML = f.olts.map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join("");
+  const f = await api("/api/filters");
+  $("#olt").innerHTML = f.olts.length
+    ? f.olts.map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join("")
+    : '<option value="">No OLTs available</option>';
   if (Q.get("olt")) $("#olt").value = Q.get("olt");
-  $$("#tabs button").forEach(x => x.classList.toggle("on", x.dataset.t === tab)); render();
+  $$("#graph-tabs button").forEach(x => x.classList.toggle("on", x.dataset.t === tab)); updateQuery(); render();
 })().catch(e => toast(e.message, true));

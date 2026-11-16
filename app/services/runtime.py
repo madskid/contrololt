@@ -10,7 +10,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.drivers import zte
 from app.models import OLT, utcnow
-from app.services import graphs, sync
+from app.services import graphs, onu_moves, sync
 
 log = logging.getLogger("smartolt.runtime")
 
@@ -74,7 +74,8 @@ async def autosave_loop() -> None:
         try:
             now_local = datetime.now(sync._tz())
             async with SessionLocal() as s:
-                rows = (await s.execute(select(OLT.id, OLT.last_save_at, OLT.last_save_attempt_at))).all()
+                rows = (await s.execute(select(OLT.id, OLT.last_save_at, OLT.last_save_attempt_at)
+                                        .where(OLT.vendor == "zte"))).all()
             due = [r.id for r in rows if sync.save_due(r.last_save_at, r.last_save_attempt_at, now_local)]
             if due:
                 log.info("Auto-saving configuration for %d OLTs", len(due))
@@ -116,4 +117,5 @@ async def run_forever() -> None:
                 log.exception("reconcile error")
             await asyncio.sleep(10)
 
-    await asyncio.gather(reconcile_loop(), autosave_loop(), graph_loop(), zte.links.janitor())
+    await asyncio.gather(reconcile_loop(), autosave_loop(), graph_loop(), zte.links.janitor(),
+                         onu_moves.move_scheduler_loop())

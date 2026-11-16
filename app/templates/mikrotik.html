@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row between mtk-page-head">
+  <div>
+    <h2>MikroTik Routers</h2>
+    <div class="muted small">Kelola perangkat melalui RouterOS native API (TCP 8728 / API-SSL 8729).</div>
+  </div>
+  {% if user_role != "read_only" %}
+  <button class="primary" id="btn-add-router">+ Add Router</button>
+  {% endif %}
+</div>
+
+<div class="card pad row wrap gap mtk-filters">
+  <input id="f-q" placeholder="Cari nama, IP, model, identity..." class="grow">
+  <select id="f-status">
+    <option value="">Semua status</option>
+    <option value="online">Online</option>
+    <option value="offline">Offline</option>
+    <option value="pending">Pending</option>
+  </select>
+</div>
+
+<div class="card scroll mtk-table-card">
+  <table id="router-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Status</th>
+        <th>Nama Router</th>
+        <th>IP / Hostname</th>
+        <th>Port</th>
+        <th>Identity</th>
+        <th>Model / Board</th>
+        <th>ROS Version</th>
+        <th>Uptime</th>
+        <th>Terakhir Dicek</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+  <p id="router-empty" class="muted pad" hidden>Belum ada router MikroTik. Klik "+ Add Router".</p>
+</div>
+
+<!-- Modal Dialog Add / Edit Router -->
+<dialog id="router-dialog">
+  <form id="router-form" method="dialog" class="stack">
+    <h3 id="dlg-title">Add MikroTik Router</h3>
+    <div class="grid2">
+      <label>Nama Router
+        <input name="name" required maxlength="100" placeholder="e.g. Core-Mikrotik-01">
+      </label>
+      <label>IP / Hostname
+        <input name="ip" required maxlength="64" placeholder="192.168.88.1">
+      </label>
+      <label>Port Native API
+        <input name="api_port" type="number" value="8728" min="1" max="65535" placeholder="8728">
+      </label>
+      <label>API User
+        <input name="api_user" required value="admin" maxlength="100">
+      </label>
+      <label>API Password
+        <input name="api_pass" type="password" autocomplete="new-password">
+      </label>
+      <label class="wide" style="flex-direction:row;gap:.5rem;align-items:center;font-size:13px;color:var(--fg);margin-top:.4rem">
+        <input name="use_ssl" type="checkbox"> Gunakan TLS (API-SSL)
+      </label>
+    </div>
+    <p class="muted small" id="pw-hint" hidden>Kosongkan password jika tidak ingin mengubah password yang tersimpan.</p>
+    <p class="muted small"><b>Catatan:</b> Aktifkan service <code>api</code> (port 8728) atau <code>api-ssl</code> (port 8729) di MikroTik. Akun harus memiliki policy <code>api</code>, <code>read</code>, dan <code>write</code>; batasi service agar hanya menerima koneksi dari server aplikasi.</p>
+    <pre id="test-out" class="out" hidden></pre>
+    <div class="row end">
+      <button type="button" id="btn-test">Test Connection</button>
+      <button type="button" id="btn-cancel">Cancel</button>
+      <button class="primary" id="btn-save" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/mikrotik.js"></script>
+{% endblock %}

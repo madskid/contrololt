@@ -1,0 +1,23 @@
+[Unit]
+Description=ControlOLT Manager
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=contrololt
+Group=contrololt
+WorkingDirectory=/opt/contrololt
+EnvironmentFile=/etc/contrololt.env
+ExecStart=/opt/contrololt/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/contrololt/data
+
+[Install]
+WantedBy=multi-user.target

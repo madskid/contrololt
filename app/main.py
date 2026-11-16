@@ -8,15 +8,15 @@ from fastapi import FastAPI, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import text
+from sqlalchemy import select, text
 from starlette.middleware.sessions import SessionMiddleware
 
-from app import api, api_master, api_users, api_write
+from app import api, api_master, api_mikrotik, api_moves, api_users, api_write
 from app.config import settings
 from app.db import SessionLocal, engine, init_db, wait_for_db
 from app.drivers import zte
-from app.models import User
-from app.security import NotAuthenticated, authenticate_user, login_blocked, login_failed
+from app.models import ONU, User
+from app.security import NotAuthenticated, authenticate_user, login_blocked, login_failed, user_olt_ids
 from app.services.runtime import run_forever
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -35,12 +35,14 @@ async def lifespan(app: FastAPI):
     await zte.links.close_all()
 
 
-app = FastAPI(title="ControlOLT Manager", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="GEKANET", version="1.0.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 app.include_router(api.router)
 app.include_router(api_master.router)
 app.include_router(api_write.router)
 app.include_router(api_users.router)
+app.include_router(api_mikrotik.router)
+app.include_router(api_moves.router)
 app.include_router(api.ws_router)
 
 
@@ -50,15 +52,27 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
+    if request.url.path.startswith("/api/"):
+        resp.headers["Cache-Control"] = "no-store"
+        resp.headers["Pragma"] = "no-cache"
     return resp
 
 
-READ_ONLY_PAGES = {"/", "/configured", "/diagnostics"}
+READ_ONLY_PAGES = {"/", "/configured", "/diagnostics", "/mikrotik", "/coverage"}
 READ_ONLY_API = (
     re.compile(r"/api/(?:summary|olts|filters|onus|onus-export|onu-types)$"),
     re.compile(r"/api/olts/\d+$"),
-    re.compile(r"/api/onus/\d+(?:/(?:status|running-config|sw-info|traffic|eth))?$"),
+    re.compile(r"/api/onus/\d+(?:/(?:status|mac|running-config|sw-info|traffic|eth))?$"),
+    re.compile(r"/api/mikrotik/onus/\d+/wan-ips$"),
     re.compile(r"/api/olts/\d+/diag$"),
+    re.compile(r"/api/mikrotik/routers$"),
+    re.compile(r"/api/mikrotik/routers/\d+/(?:profiles|secrets|active|mac-lookup)$"),
+    re.compile(r"/api/odbs$"),
+    re.compile(r"/api/zones$"),
+)
+OLT_LIMITED_API = (
+    re.compile(r"/api/(?:summary|olts|filters|onus|onus-export)$"),
+    re.compile(r"/api/onus/\d+(?:/status)?$"),
 )
 
 
@@ -78,8 +92,35 @@ async def authorize_role(request: Request, call_next):
         return RedirectResponse("/login", status_code=303)
     request.state.user = user
     request.state.user_role = user.role
+    if user.role == "olt_limited":
+        async with SessionLocal() as session:
+            allowed_olt_ids = await user_olt_ids(session, user.id)
+            page_allowed = request.method == "GET" and (
+                path in {"/", "/configured"} or re.fullmatch(r"/onus/\d+", path)
+            )
+            api_allowed = request.method == "GET" and any(
+                pattern.fullmatch(path) for pattern in OLT_LIMITED_API
+            )
+            reboot_allowed = request.method == "POST" and re.fullmatch(
+                r"/api/onus/\d+/reboot", path
+            )
+            if not (page_allowed or api_allowed or reboot_allowed):
+                if path.startswith("/api/"):
+                    return JSONResponse({"detail": "This account can only view assigned OLTs and reboot their ONUs."},
+                                        status_code=403)
+                return HTMLResponse("This account can only view assigned OLTs and reboot their ONUs.", status_code=403)
+            onu_match = re.fullmatch(r"/(?:api/)?onus/(\d+)(?:/status)?", path)
+            reboot_match = re.fullmatch(r"/api/onus/(\d+)/reboot", path)
+            match = onu_match or reboot_match
+            if match:
+                olt_id = await session.scalar(
+                    select(ONU.olt_id).where(ONU.id == int(match.group(1)))
+                )
+                if olt_id not in allowed_olt_ids:
+                    return JSONResponse({"detail": "ONU not found"}, status_code=404)
+        request.state.allowed_olt_ids = allowed_olt_ids
     if user.role == "read_only":
-        page_allowed = request.method == "GET" and (path in READ_ONLY_PAGES or re.fullmatch(r"/onus/\d+", path))
+        page_allowed = request.method == "GET" and (path in READ_ONLY_PAGES or re.fullmatch(r"/onus/\d+", path) or re.fullmatch(r"/mikrotik/\d+", path))
         api_allowed = request.method == "GET" and any(pattern.fullmatch(path) for pattern in READ_ONLY_API)
         if not (page_allowed or api_allowed) and not path.startswith("/static/"):
             if path.startswith("/api/"):
@@ -142,9 +183,13 @@ async def home():
 
 for _path, _tpl, _active in [("/configured", "configured.html", "configured"), ("/diagnostics", "diagnostics.html", "diagnostics"),
                              ("/unconfigured", "unconfigured.html", "unconfigured"), ("/graphs", "graphs.html", "graphs"),
+                             ("/coverage", "coverage.html", "coverage"),
+                             ("/mikrotik", "pppoe.html", "mikrotik"),
+                             ("/settings/mikrotik", "mikrotik.html", "settings"),
                              ("/settings/olts", "settings_olts.html", "settings"),
                              ("/settings/users", "users.html", "settings"),
-                             ("/settings/zones", "crud.html", "settings"), ("/settings/audit", "audit.html", "settings"), ("/settings/speed-profiles", "crud.html", "settings"),
+                             ("/settings/zones", "crud.html", "settings"), ("/settings/odbs", "crud.html", "settings"),
+                             ("/settings/audit", "audit.html", "settings"), ("/settings/speed-profiles", "crud.html", "settings"),
                              ("/settings/onu-types", "crud.html", "settings")]:
     def _make(tpl=_tpl, active=_active, path=_path):
         async def view(request: Request):
@@ -166,6 +211,11 @@ async def olt_page(request: Request, olt_id: int):
 @app.get("/onus/{onu_id}", response_class=HTMLResponse)
 async def onu_page(request: Request, onu_id: int):
     return _page(request, "onu.html", onu_id=onu_id, active="configured")
+
+
+@app.get("/mikrotik/{router_id}", response_class=HTMLResponse)
+async def mikrotik_router_page(request: Request, router_id: int):
+    return _page(request, "mikrotik_router.html", router_id=router_id, active="mikrotik")
 
 
 @app.get("/health")

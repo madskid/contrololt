@@ -7,6 +7,21 @@ const fail = (el, e) => el.innerHTML = `<p class="err">${esc(e.message)}</p>`;
 async function tDetails() {
   const el = $("#tab-details"), o = await api(`/api/olts/${id}`);
   $("#olt-title").textContent = o.name;
+  if (o.vendor === "hioso" || o.vendor === "cdata") {
+    const cdataOlt = o.vendor === "cdata";
+    $$("#tabs button[data-tab]").forEach(b => { b.hidden = !["details", "pon"].includes(b.dataset.tab); });
+    el.innerHTML = kv([["Vendor / model", `${esc(o.vendor.toUpperCase())} ${esc(o.model)}`], ["Status", `${badge(o.status)} ${esc(o.status_msg)}`],
+      ["IP / SNMP", `${esc(o.ip)} / UDP ${o.snmp_port}`], ["Software", esc(o.sw_version) || "—"],
+      ["Uptime (SNMP)", fmtUp(o.uptime_s)], ["sysDescr", esc(o.sys_descr) || "—"],
+      ["Last poll", ago(o.last_poll_at)], ["Poll source", esc(o.poll_source) || "—"],
+      ["Integration mode", cdataOlt ? '<span class="badge">SNMP read-only</span>' :
+        o.write_enabled ? "SNMP monitoring + limited Telnet rename/reboot" : '<span class="badge">SNMP read-only</span>'],
+      ["ONUs", `${o.counts.total} (online ${o.counts.online}, offline ${o.counts.offline})`]]) +
+      `<div class="row gap pad"><button id="d-sync">Sync now</button><a class="btn" href="/configured?olt=${id}">View ONUs</a>${cdataOlt ? "" : `<a class="btn" href="/graphs?olt=${id}">Traffic graphs</a>`}</div>`;
+    $("#d-sync").onclick = async () => { try { await api(`/api/olts/${id}/sync`, {method: "POST"}); toast("Read-only SNMP sync scheduled"); } catch (e) { toast(e.message, true); } };
+    return;
+  }
+  $$("#tabs button[data-tab]").forEach(b => { b.hidden = false; });
   el.innerHTML = kv([["Status", `${badge(o.status)} ${esc(o.status_msg)}`], ["Name", esc(o.name)], ["IP", esc(o.ip)], ["Hardware", esc(o.hw_version)],
     ["Software", esc(o.sw_version) || "—"],     ["Telnet / SNMP port", `${o.telnet_port} / ${o.snmp_port}`], ["CLI style", esc(o.cli_family)],
     ["Uptime (SNMP)", fmtUp(o.uptime_s)], ["sysDescr", esc(o.sys_descr) || "—"], ["Poll source", esc(o.poll_source) || "—"],
@@ -39,12 +54,14 @@ async function tCards() {
 }
 async function tPon() {
   const el = $("#tab-pon"), r = await api(`/api/olts/${id}/pon-ports`);
-  el.innerHTML = `<div class="muted small pad">ONU count, load, and average signal are calculated from ONU data; descriptions and admin state come from running-config. Link status and Tx power are not available.</div>` +
+  const oltVendor = (await api(`/api/olts/${id}`)).vendor;
+  const readOnlyEpon = ["hioso", "cdata"].includes(oltVendor);
+  el.innerHTML = `<div class="muted small pad">${readOnlyEpon ? "EPON port status, ONU counts, and average Rx are derived from read-only SNMP data." : "ONU count, load, and average signal are calculated from ONU data; descriptions and admin state come from running-config. Link status and Tx power are not available."}</div>` +
     (r.slots.map(s => `<h4 class="slot">OLT slot ${s.slot}${s.board_type ? `, board type: ${esc(s.board_type)}` : ""}</h4><table><thead><tr><th>Port</th><th>Type</th><th>Admin state</th><th>Status</th><th>ONUs</th><th>Load</th><th>Average signal</th><th>Description</th><th>Action</th></tr></thead><tbody>
     ${s.ports.map(p => `<tr><td>${p.port}</td><td>${p.type}</td><td class="${p.admin === "Disabled" ? "err" : ""}">${p.admin}</td><td>${p.status || "-"}</td>
       <td>Online: ${p.online}<br>Total: ${p.total}</td><td><span class="usage"><i style="width:${Math.min(100, p.total / p.capacity * 100)}%"></i></span> ${p.total}/${p.capacity}</td>
       <td>${p.avg_rx == null ? "—" : rxbar(p.avg_rx)}</td><td>${esc(p.description)}</td>
-      <td><a href="/graphs?olt=${id}&tab=pon&key=${encodeURIComponent("gpon-olt_" + p.shelf + "/" + p.slot + "/" + p.port)}">Traffic</a></td></tr>`).join("")}      </tbody></table>`).join("") || '<p class="muted">No PON data yet. Wait for the first sync.</p>');
+      <td><a href="/graphs?olt=${id}&tab=pon">Traffic</a></td></tr>`).join("")}      </tbody></table>`).join("") || '<p class="muted">No PON data yet. Wait for the first sync.</p>');
 }
 const later = fn => setTimeout(fn, 7000);   // The worker re-reads OLT config a few seconds after changes.
 async function tUplink() {

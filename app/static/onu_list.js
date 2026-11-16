@@ -1,6 +1,6 @@
 // Configured & Diagnostics pages: full filters, server-side pagination, CSV export, and live updates.
 const DIAG = window.LIST_MODE === "diag";
-const S = {page: 1, status: new Set(), signal: new Set()};
+const S = {page: 1, status: new Set(), signal: new Set(), ponType: ""};
 const STATUS_BTNS = [["online", "Online", "#16a34a"], ["power_fail", "Power fail", "#d97706"], ["los", "LOS", "#dc2626"],
                      ["offline", "Offline", "#8b93a5"], ["unknown", "Unknown", "#7c8aa5"]];
 const SIG_BTNS = [["good", "▂▄▆ Good", "#16a34a"], ["warn", "▂▄ Warning", "#d97706"], ["crit", "▂ Critical", "#dc2626"]];
@@ -14,7 +14,7 @@ $("#filters").innerHTML = `<div class="filters">
   ${DIAG ? '<label>Changed from<input id="f-from" type="date"></label><label>Changed to<input id="f-to" type="date"></label>' : ""}
 </div>
 <div class="filters-bar">
-  <label>PON type<span class="seg"><button type="button" disabled title="EPON is not supported yet">EPON</button><button type="button" class="on">GPON</button></span></label>
+  <label>PON type<span class="seg" id="seg-pon-type"><button type="button" data-pon="" class="on">All</button><button type="button" data-pon="epon">EPON</button><button type="button" data-pon="gpon">GPON</button></span></label>
   <label>Status<span class="seg" id="seg-status">${STATUS_BTNS.map(([k, l, c]) => `<button type="button" data-k="${k}" title="${l}"><span class="dotc" style="background:${c}"></span>${l}</button>`).join("")}</span></label>
   <label>Signal<span class="seg" id="seg-signal">${SIG_BTNS.map(([k, l, c]) => `<button type="button" data-k="${k}" style="color:${c}">${l}</button>`).join("")}</span></label>
   <span class="row gap push"><button type="button" id="f-reset">Reset</button><button type="button" id="f-refresh">Refresh</button><a class="btn" id="f-export" href="#">Export CSV</a></span>
@@ -44,6 +44,7 @@ function params(extra = {}) {
     .forEach(([k, id]) => { const el = $("#" + id); if (el && el.value) p.set(k, el.value); });
   if (S.status.size) p.set("status", [...S.status].join(","));
   if (S.signal.size) p.set("signal", [...S.signal].join(","));
+  if (S.ponType) p.set("pon_type", S.ponType);
   if (DIAG) p.set("sort", "changed");
   Object.entries(extra).forEach(([k, v]) => p.set(k, v));
   return p;
@@ -92,8 +93,16 @@ function toggle(segId, set) {
   };
 }
 toggle("#seg-status", S.status); toggle("#seg-signal", S.signal);
+$("#seg-pon-type").onclick = e => {
+  const b = e.target.closest("button[data-pon]");
+  if (!b) return;
+  S.ponType = b.dataset.pon;
+  $$("#seg-pon-type button").forEach(option => option.classList.toggle("on", option === b));
+  reload();
+};
 $("#f-reset").onclick = () => { $$("#filters input, #filters select").forEach(e => e.value = ""); S.status.clear(); S.signal.clear();
-  $$("#filters .seg button").forEach(b => b.classList.remove("on")); $$("#filters .seg button:last-child")[0]; loadFilters().then(reload); };
+  S.ponType = ""; $$("#filters .seg button").forEach(b => b.classList.remove("on"));
+  $("#seg-pon-type button[data-pon='']").classList.add("on"); loadFilters().then(reload); };
 $("#f-refresh").onclick = () => load().catch(e => toast(e.message, true));
 $$(".prev").forEach(b => b.onclick = () => { if (S.page > 1) { S.page--; load(); } });
 $$(".next").forEach(b => b.onclick = () => { if (S.page < pages) { S.page++; load(); } });
@@ -107,4 +116,10 @@ onEvent(m => {
     const l = tr.querySelector(".rxl"); if (l) l.innerHTML = rxbar(opticalValue(c.status, c.olt_rx_power), w, k);
   } else if (m.type === "onus_reload") load().catch(() => {});
 });
-loadFilters().then(load).catch(e => toast(e.message, true));
+const initialProfileId = new URLSearchParams(location.search).get("profile_id");
+loadFilters().then(() => {
+  if (!DIAG && initialProfileId && [...$("#f-profile").options].some(option => option.value === initialProfileId)) {
+    $("#f-profile").value = initialProfileId;
+  }
+  return load();
+}).catch(e => toast(e.message, true));

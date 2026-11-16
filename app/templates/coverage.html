@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Coverage - GEKANET{% endblock %}
+{% block content %}
+<div class="coverage-page">
+<div class="row between wrap">
+  <div><h2>Coverage</h2><div class="muted small">Peta titik ODB yang memiliki koordinat. Data dikelola dari menu ODB.</div></div>
+  {% if user_role != "read_only" %}<a class="btn" href="/settings/odbs">Kelola ODB</a>{% endif %}
+</div>
+<div class="card pad row wrap gap">
+  <label>Zone <select id="coverage-zone"><option value="">Semua zone</option></select></label>
+  <span id="coverage-count" class="muted small"></span>
+</div>
+<div class="card pad coverage-search">
+  <div class="row wrap gap">
+    <label class="coverage-query"><span>Lokasi calon customer</span><input id="customer-location" placeholder="Koordinat atau link Google Maps"></label>
+    <button type="button" class="primary" id="check-customer">Cek koordinat</button>
+    <button type="button" id="my-location">Lokasi saya</button>
+  </div>
+  <div id="customer-result" class="coverage-result muted small">Masukkan koordinat seperti <code>-7.872512, 110.624397</code> atau link Google Maps.</div>
+</div>
+<div id="coverage-map" class="coverage-map"><div class="coverage-status">Memuat peta dan data ODB…</div></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/coverage.js?v=20261102-9"></script>
+{% endblock %}

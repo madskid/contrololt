@@ -41,7 +41,7 @@ class Settings:
         # False = run separately with `python -m app.worker` (recommended for production).
         self.run_workers = _bool("RUN_WORKERS", True)
         self.poll_interval = int(os.getenv("POLL_INTERVAL", "60"))          # Status and signal polling interval in seconds
-        self.full_sync_hours = float(os.getenv("FULL_SYNC_HOURS", "6"))      # Re-fetch running-config
+        self.full_sync_hours = float(os.getenv("FULL_SYNC_HOURS", "1"))      # Re-fetch running-config
         self.cli_rx_every = int(os.getenv("CLI_RX_EVERY", "10"))            # CLI: sample Rx per PON every N polls (default ~10 minutes)
         self.autosave_time = os.getenv("AUTOSAVE_TIME", "02:30")             # HH:MM local time
         self.timezone = os.getenv("TZ_NAME", "Asia/Jakarta")

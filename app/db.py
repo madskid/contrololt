@@ -80,6 +80,17 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(ensure_columns)
+        if await conn.run_sync(lambda sync_conn: sync_conn.dialect.has_table(
+                sync_conn, "mikro_routers")):
+            plain_migration = await conn.execute(text(
+                "UPDATE mikro_routers SET api_port = 8728 WHERE api_port = 80"
+            ))
+            tls_migration = await conn.execute(text(
+                "UPDATE mikro_routers SET api_port = 8729, use_ssl = TRUE WHERE api_port = 443"
+            ))
+            migrated = (plain_migration.rowcount or 0) + (tls_migration.rowcount or 0)
+            if migrated:
+                log.info("Migrated %d MikroTik router entries from REST to native API ports", migrated)
     from app.security import seed_admin
     async with SessionLocal() as session:
         await seed_admin(session)

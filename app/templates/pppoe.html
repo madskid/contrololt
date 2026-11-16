@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}PPPoE Users · GEKANET{% endblock %}
+{% block content %}
+<div class="pppoe-head">
+  <h2>PPPoE Users</h2>
+  <div class="row wrap">
+    <select id="pppoe-router" class="pppoe-router-select" aria-label="Pilih router MikroTik">
+      <option value="">Memuat router…</option>
+    </select>
+    <button id="btn-pppoe-refresh" title="Refresh data" aria-label="Refresh data">↻</button>
+  </div>
+</div>
+
+<section class="pppoe-stats" aria-label="Ringkasan PPPoE">
+  <button type="button" class="pppoe-stat pppoe-stat-filter" data-status-filter="all" aria-pressed="false" aria-label="Tampilkan semua user">
+    <span class="pppoe-stat-icon" aria-hidden="true">♙</span>
+    <span class="pppoe-stat-copy"><b id="stat-total">—</b><span>Total User</span></span>
+  </button>
+  <button type="button" class="pppoe-stat pppoe-stat-filter online" data-status-filter="online" aria-pressed="false" aria-label="Filter user online">
+    <span class="pppoe-stat-icon" aria-hidden="true">⌁</span>
+    <span class="pppoe-stat-copy"><b id="stat-online">—</b><span>Online</span></span>
+  </button>
+  <button type="button" class="pppoe-stat pppoe-stat-filter offline" data-status-filter="offline" aria-pressed="false" aria-label="Filter user offline">
+    <span class="pppoe-stat-icon" aria-hidden="true">⌁</span>
+    <span class="pppoe-stat-copy"><b id="stat-offline">—</b><span>Offline</span></span>
+  </button>
+  <button type="button" class="pppoe-stat pppoe-stat-filter disabled" data-status-filter="disabled" aria-pressed="false" aria-label="Filter user disabled">
+    <span class="pppoe-stat-icon" aria-hidden="true">⊘</span>
+    <span class="pppoe-stat-copy"><b id="stat-disabled">—</b><span>Disabled</span></span>
+  </button>
+</section>
+
+<section class="card">
+  <div class="pppoe-toolbar">
+    <h3 style="margin:0">Manajemen PPPoE</h3>
+    <div class="row wrap">
+      <input id="pppoe-search" class="pppoe-search" placeholder="Cari username, profile, IP, caller ID…">
+      {% if user_role != "read_only" %}
+      <a id="btn-open-router" class="btn" href="/settings/mikrotik">Router</a>
+      <button class="primary" id="btn-add-secret">＋ Tambah</button>
+      {% endif %}
+    </div>
+  </div>
+  <div class="scroll">
+    <table id="pppoe-table">
+      <colgroup>
+        <col class="pppoe-col-user"><col class="pppoe-col-profile"><col class="pppoe-col-status">
+        <col class="pppoe-col-ip"><col class="pppoe-col-uptime"><col class="pppoe-col-mac">
+        <col class="pppoe-col-comment"><col class="pppoe-col-action">
+      </colgroup>
+      <thead><tr>
+        <th>Username</th><th>Profile</th><th>Status</th><th>IP</th><th>Uptime</th>
+        <th>Last Caller ID</th><th>Komentar</th><th>Action</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <p id="pppoe-empty" class="muted pppoe-empty" hidden></p>
+  </div>
+</section>
+
+<dialog id="secret-dialog">
+  <form id="secret-form" method="dialog" class="stack">
+    <h3>Tambah PPPoE User</h3>
+    <p class="muted small">Password otomatis mengikuti bagian username sebelum tanda <code>_</code> atau <code>-</code> (a→4, e→3, i→1, o→0, s→5). Contoh: <code>joko-mumbul</code> menjadi <code>j0k0</code>. Password tetap bisa diedit, atau dibuat acak dengan tombol di sampingnya.</p>
+    <div class="grid2">
+      <label>Username
+        <span class="pppoe-input-action">
+          <input name="name" required maxlength="120" autocomplete="off">
+        </span>
+      </label>
+      <label>Password
+        <span class="pppoe-input-action">
+          <input name="password" type="text" required maxlength="256" autocomplete="new-password">
+          <button type="button" id="btn-generate-password" title="Buat password acak">Acak password</button>
+        </span>
+      </label>
+      <label>Profile<select name="profile" required></select></label>
+      <label>Komentar<input name="comment" maxlength="500" placeholder="activation 18-Oct-2026 30M"></label>
+    </div>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Batal</button>
+      <button type="button" id="btn-copy-credentials">Salin username + password</button>
+      <button class="primary" id="btn-save-secret" value="ok">Generate user</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="secret-edit-dialog">
+  <form id="secret-edit-form" method="dialog" class="stack">
+    <h3>Edit PPPoE User: <span id="edit-username"></span></h3>
+    <div class="grid2">
+      <label>Password baru (opsional)<input name="password" type="password" maxlength="256" autocomplete="new-password"></label>
+      <label>Profile<select name="profile" required></select></label>
+      <label class="wide">Komentar<input name="comment" maxlength="500"></label>
+      <label class="wide" style="flex-direction:row;align-items:center;color:var(--fg)">
+        <input name="disabled" type="checkbox"> Disable user
+      </label>
+    </div>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Batal</button>
+      <button class="primary" id="btn-save-edit-secret" value="ok">Simpan perubahan</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="change-profile-dialog">
+  <form id="change-profile-form" method="dialog" class="stack">
+    <h3>Ganti Profile PPPoE</h3>
+    <div class="muted small">User: <b id="cp-username"></b></div>
+    <label>Profile baru<select name="profile" required id="cp-select"></select></label>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Batal</button>
+      <button class="primary" id="btn-save-change-profile" value="ok">Ganti profile</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="onu-lookup-dialog">
+  <div class="stack">
+    <h3>Hasil pencarian ONU</h3>
+    <div class="kv">
+      <dt>Username</dt><dd id="lookup-user">—</dd>
+      <dt>Caller ID / MAC</dt><dd id="lookup-mac">—</dd>
+      <dt>Hasil</dt><dd id="lookup-message">—</dd>
+      <dt>Serial Number ONU</dt><dd id="lookup-sn">—</dd>
+      <dt>Lokasi</dt><dd id="lookup-position">—</dd>
+    </div>
+    <div class="row between">
+      <a id="lookup-onu-link" class="btn" href="#" hidden>Buka detail ONU</a>
+      <button type="button" id="btn-close-lookup">Tutup</button>
+    </div>
+  </div>
+</dialog>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/pppoe.js?v=20261101-2"></script>
+{% endblock %}

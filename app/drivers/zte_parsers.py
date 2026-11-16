@@ -380,6 +380,33 @@ def parse_olt_config_extras(text: str) -> dict:
             "speed": speed, "onu_types": onu_types, "cards": cards}
 
 
+def parse_tcont_profiles(text: str) -> list[dict]:
+    """Extract T-CONT profile definitions from a ZTE running-config."""
+    profiles = []
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line == "!":
+            section = ""
+            continue
+        match = re.match(r"profile\s+tcont\s+(\S+)\s+type\s+(\d+)(.*)$", line, re.I)
+        if match:
+            parameters = {key.lower(): int(value) for key, value in
+                          re.findall(r"\b(fixed|assured|maximum)\s+(\d+)", match.group(3), re.I)}
+            profiles.append({
+                "name": match.group(1),
+                "type": int(match.group(2)),
+                "parameters": parameters,
+                "mode": section or "gpon",
+            })
+            continue
+        if not raw[0].isspace():
+            section = line.lower() if line.lower() in ("gpon", "pon") else ""
+    return profiles
+
+
 _CARD_RE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d+|-+)\s*(.*?)\s*$")
 
 

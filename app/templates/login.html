@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Login — ControlOLT Manager</title><link rel="stylesheet" href="/static/app.css"></head>
+<title>Login — GEKANET</title><link rel="stylesheet" href="/static/app.css?v=20261108-1"></head>
 <body class="center">
 <form method="post" action="/login" class="card login">
-  <h1>ControlOLT Manager</h1>
+  <img class="login-logo" src="/static/gekanet-logo.png" alt="GEKANET">
   {% if error %}<p class="err">{{ error }}</p>{% endif %}
   <label>Username<input name="username" autocomplete="username" required autofocus></label>
   <label>Password<input name="password" type="password" autocomplete="current-password" required></label>

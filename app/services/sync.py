@@ -12,10 +12,11 @@ from sqlalchemy.exc import IntegrityError
 from app.bus import bus
 from app.config import settings
 from app.db import SessionLocal
-from app.drivers import zte, zte_parsers as P
+from app.drivers import cdata, hioso, zte, zte_parsers as P
 from app.drivers.snmp import SnmpError
 from app.drivers.zte_parsers import phase_to_status
-from app.models import AuditLog, OLT, ONU, OnuMacAddress, OltInfo, OnuType, SpeedProfile, utcnow
+from app.models import (AuditLog, OLT, ONU, OnuMacAddress, OnuWanIp, OltInfo, OnuType,
+                        SpeedProfile, utcnow)
 from app.services import provision as V
 
 log = logging.getLogger("smartolt.sync")
@@ -34,7 +35,8 @@ def olt_event(olt: OLT) -> dict:
 
 
 async def counts_for(session, olt_id: int | None = None) -> dict[int, dict]:
-    q = select(ONU.olt_id, ONU.status, func.count()).group_by(ONU.olt_id, ONU.status)
+    q = (select(ONU.olt_id, ONU.status, func.count())
+         .where(ONU.hidden_duplicate.is_(False)).group_by(ONU.olt_id, ONU.status))
     if olt_id:
         q = q.where(ONU.olt_id == olt_id)
     out: dict[int, dict] = {}
@@ -113,7 +115,7 @@ async def push_speed_profile_to_all_olts(profile_id: int, user: str) -> None:
             log.warning("Speed profile distribution %s cancelled: profile no longer exists", profile_id)
             return
         profile_data = {"name": profile.name, "kbps": profile.kbps, "direction": profile.direction}
-        targets = list((await s.scalars(select(OLT).order_by(OLT.name))).all())
+        targets = list((await s.scalars(select(OLT).where(OLT.vendor == "zte").order_by(OLT.name))).all())
 
     for olt in targets:
         commands: list[str] = []
@@ -122,7 +124,7 @@ async def push_speed_profile_to_all_olts(profile_id: int, user: str) -> None:
             prof = zte.profile_for(olt.cli_family)
             list_cmd = prof.tcont_list_cmd if profile_data["direction"] == "upload" else prof.traffic_list_cmd
 
-            async with zte.links.session(conn) as cli:
+            async with zte.links.session(conn, lane="sync") as cli:
                 listed = await cli.run(list_cmd, overall=30, idle=10)
             names = P.parse_profile_names(listed.text) if not listed.error and listed.complete else []
             if not names:
@@ -224,7 +226,7 @@ async def replicate_speed_profiles(source_olt_id: int, profiles: dict) -> None:
 
     async with SessionLocal() as s:
         targets = list((await s.scalars(
-            select(OLT).where(OLT.id != source_olt_id, OLT.write_enabled.is_(True))
+            select(OLT).where(OLT.id != source_olt_id, OLT.vendor == "zte", OLT.write_enabled.is_(True))
         )).all())
 
     for olt in targets:
@@ -242,7 +244,7 @@ async def replicate_speed_profiles(source_olt_id: int, profiles: dict) -> None:
             prof = zte.profile_for(olt.cli_family)
             list_cmd = prof.tcont_list_cmd if direction == "upload" else prof.traffic_list_cmd
             try:
-                async with zte.links.session(conn) as cli:
+                async with zte.links.session(conn, lane="sync") as cli:
                     listed = await cli.run(list_cmd, overall=30, idle=10)
                 names = P.parse_profile_names(listed.text) if not listed.error and listed.complete else []
                 if not names:
@@ -295,14 +297,15 @@ async def replicate_speed_profiles(source_olt_id: int, profiles: dict) -> None:
 def apply_item(o: ONU, item: dict, prof_id: dict, partial: bool = False) -> None:
     """Copy parsed OLT configuration into an ONU row. Do not overwrite names changed in the dashboard.
     partial=True (resync one ONU): the ONU interface output does not contain SN/type, so do not clear them."""
-    for f in ("sn", "onu_type", "description", "vlan", "conn_type", "pppoe_user", "mgmt_ip", "mgmt_vlan"):
+    for f in ("sn", "onu_type", "vlan", "conn_type", "pppoe_user", "mgmt_ip", "mgmt_vlan"):
         if partial and f in ("sn", "onu_type"):
             continue
         if getattr(o, f) != item[f]:
             setattr(o, f, item[f])
     nm = item["name"] or item["description"] or item["sn"]
-    if not o.name or o.name == o.cfg_name:
+    if not o.name_locked and (not o.name or o.name == o.cfg_name):
         o.name = nm
+        o.description = item["description"]
     o.cfg_name = nm
     if not o.mode and item["mode"]:
         o.mode = item["mode"]
@@ -324,7 +327,7 @@ async def _read_onu_macs(conn, onus: list[dict]) -> tuple[dict, set[tuple], int]
 
     rows_by_key, scanned, failed = {}, set(), 0
     try:
-        async with zte.links.session(conn, wait=60) as cli:
+        async with zte.links.session(conn, wait=60, lane="sync") as cli:
             for item in onus:
                 key = (item["shelf"], item["slot"], item["pon"], item["onu_number"])
                 cmd = conn.profile.mac_cmd.format(**zte.onu_command_format(conn, key))
@@ -354,6 +357,8 @@ async def _read_onu_macs(conn, onus: list[dict]) -> tuple[dict, set[tuple], int]
 async def store_onu_macs(session, onu_id: int, rows: list[dict]) -> bool:
     """Store MAC results from an ONU status read; return True if the cache changed."""
     unique = {row["mac"]: row["mac"] for row in rows}
+    if not unique:
+        return False
     existing = list(await session.scalars(select(OnuMacAddress).where(OnuMacAddress.onu_id == onu_id)))
     if {row.mac for row in existing} == set(unique):
         return False
@@ -366,15 +371,276 @@ async def store_onu_macs(session, onu_id: int, rows: list[dict]) -> bool:
     return True
 
 
+async def _sync_onu_mac_cache(
+    session,
+    onu: ONU,
+    previous_identity: str,
+    identity: str,
+    learned_macs: list[str] | None,
+    macs_by_onu: dict[int, list[OnuMacAddress]],
+    now: datetime,
+) -> None:
+    """Keep the ONU identity MAC and replace learned client MACs only after a successful scan."""
+    def compact(value: str) -> str:
+        return re.sub(r"[^0-9A-Fa-f]", "", value or "").upper()
+
+    identity_compact = compact(identity)
+    previous_compact = compact(previous_identity)
+    learned = {compact(mac): mac for mac in (learned_macs or []) if compact(mac)}
+    cached = macs_by_onu.get(onu.id, [])
+    kept = set()
+
+    for row in cached:
+        row_compact = row.mac_compact or compact(row.mac)
+        if row_compact == identity_compact:
+            if identity_compact in kept:
+                await session.delete(row)
+            else:
+                row.mac = ":".join(identity_compact[i:i + 2] for i in range(0, 12, 2))
+                row.mac_compact, row.updated_at = identity_compact, now
+                kept.add(identity_compact)
+            continue
+        if learned_macs is not None:
+            if row_compact in learned:
+                row.mac, row.mac_compact, row.updated_at = learned[row_compact], row_compact, now
+                kept.add(row_compact)
+            else:
+                await session.delete(row)
+            continue
+        if row_compact == previous_compact:
+            await session.delete(row)
+        else:
+            kept.add(row_compact)
+
+    if identity_compact and identity_compact not in kept:
+        formatted = ":".join(identity_compact[i:i + 2] for i in range(0, 12, 2))
+        session.add(OnuMacAddress(
+            onu_id=onu.id, mac=formatted, mac_compact=identity_compact, updated_at=now,
+        ))
+        kept.add(identity_compact)
+    if learned_macs is not None:
+        for mac_compact, mac in learned.items():
+            if mac_compact in kept:
+                continue
+            session.add(OnuMacAddress(
+                onu_id=onu.id, mac=mac, mac_compact=mac_compact, updated_at=now,
+            ))
+            kept.add(mac_compact)
+
+
 # ───────────────────────── full sync ─────────────────────────
+async def _hioso_full_sync(olt_id: int, client, olt) -> None:
+    try:
+        info, data = await asyncio.gather(hioso.system_info(client), hioso.read_onus(client))
+    except SnmpError as exc:
+        await _mark(olt_id, "offline", f"HIOSO SNMP sync failed: {exc}")
+        return
+    try:
+        learned_by_onu = await hioso.read_onu_macs(olt, data)
+    except (SnmpError, hioso.TelnetError) as exc:
+        log.warning("HIOSO learned-MAC scan failed for OLT %s; preserving its previous MAC cache: %s",
+                    olt_id, exc)
+        learned_by_onu = None
+    now = utcnow()
+    async with SessionLocal() as s:
+        olt = await s.get(OLT, olt_id)
+        if not olt:
+            return
+        existing = {(o.shelf, o.slot, o.pon, o.onu_number): o
+                    for o in await s.scalars(select(ONU).where(ONU.olt_id == olt_id))}
+        existing_ids = [o.id for o in existing.values() if o.id]
+        mac_rows = (await s.scalars(select(OnuMacAddress).where(
+            OnuMacAddress.onu_id.in_(existing_ids)))).all() if existing_ids else []
+        macs_by_onu: dict[int, list[OnuMacAddress]] = {}
+        for mac_row in mac_rows:
+            macs_by_onu.setdefault(mac_row.onu_id, []).append(mac_row)
+        seen = set()
+        for (pon, number), item in data.items():
+            key = (olt.shelf, 1, pon, number)
+            seen.add(key)
+            onu = existing.get(key)
+            if onu is None:
+                onu = ONU(olt_id=olt_id, shelf=key[0], slot=key[1], pon=key[2], onu_number=key[3])
+                s.add(onu)
+            previous_identity = (onu.sn or "") if onu else ""
+            name = item.get("name", "").strip()
+            name = name if name.casefold() not in ("", "na", "unknown") else ""
+            mac = item["mac"].upper()
+            formatted_mac = ":".join(mac[i:i + 2] for i in range(0, 12, 2))
+            onu.sn = formatted_mac
+            state = item.get("state", "")
+            status = "online" if state == "1" else "offline" if state == "2" else "unknown"
+            try:
+                rx = float(item.get("rx", ""))
+                if item.get("rx", "").casefold() == "na" or rx == 0:
+                    rx = None
+            except ValueError:
+                rx = None
+            if onu.status != status:
+                onu.status_changed_at = now
+            onu.status, onu.phase_state, onu.rx_power, onu.updated_at = status, state, rx, now
+            if name:
+                previous_cfg_name = onu.cfg_name
+                if not onu.name or onu.name == previous_cfg_name:
+                    onu.name = name
+                onu.cfg_name = name
+            if onu.id is None:
+                await s.flush()
+            await _sync_onu_mac_cache(
+                s, onu, previous_identity, formatted_mac,
+                learned_by_onu.get((pon, number), []) if learned_by_onu is not None else None,
+                macs_by_onu, now,
+            )
+        olt.status, olt.poll_source, olt.last_poll_at = "online", "snmp", now
+        olt.last_full_sync_at = now
+        olt.sys_descr = info["sys_descr"]
+        olt.uptime_s = info["uptime_s"]
+        olt.sw_version = info["version"] or info["firmware"] or olt.sw_version
+        mac_note = (
+            f"; {sum(map(len, learned_by_onu.values()))} learned client MACs"
+            if learned_by_onu is not None else
+            "; learned-MAC scan failed, previous MAC cache retained"
+        )
+        olt.status_msg = f"HIOSO SNMP/CLI sync OK: {len(seen)} ONUs (read-only){mac_note}"
+        await s.commit()
+        await bus.publish(olt_event(olt))
+        await _publish_counts(s, olt_id)
+        await bus.publish({"type": "onus_reload", "olt_id": olt_id})
+
+
+async def _cdata_full_sync(olt_id: int, client) -> None:
+    try:
+        info, data = await asyncio.gather(cdata.system_info(client), cdata.read_onus(client))
+        if not data:
+            raise SnmpError("C-Data EPON returned no valid ONU rows; existing inventory was left unchanged.")
+    except SnmpError as exc:
+        await _mark(olt_id, "offline", f"C-Data SNMP sync failed: {exc}")
+        return
+    try:
+        learned_by_onu = await cdata.read_onu_macs(client, data)
+    except SnmpError as exc:
+        log.warning("C-Data learned-MAC scan failed for OLT %s; preserving its previous MAC cache: %s",
+                    olt_id, exc)
+        learned_by_onu = None
+    now = utcnow()
+    async with SessionLocal() as s:
+        olt = await s.get(OLT, olt_id)
+        if not olt:
+            return
+        existing = {(o.shelf, o.slot, o.pon, o.onu_number): o
+                    for o in await s.scalars(select(ONU).where(ONU.olt_id == olt_id))}
+        existing_ids = [o.id for o in existing.values() if o.id]
+        mac_rows = (await s.scalars(select(OnuMacAddress).where(
+            OnuMacAddress.onu_id.in_(existing_ids)))).all() if existing_ids else []
+        macs_by_onu: dict[int, list[OnuMacAddress]] = {}
+        for mac_row in mac_rows:
+            macs_by_onu.setdefault(mac_row.onu_id, []).append(mac_row)
+        external_macs = set((await s.scalars(
+            select(OnuMacAddress.mac_compact)
+            .join(ONU, ONU.id == OnuMacAddress.onu_id)
+            .where(ONU.olt_id != olt_id, ONU.hidden_duplicate.is_(False))
+        )).all())
+        seen_macs = set()
+        for (slot, pon, number), item in sorted(data.items()):
+            key = (0, slot, pon, number)
+            onu = existing.get(key)
+            mac = item["mac"].upper()
+            if mac in external_macs or mac in seen_macs:
+                if onu is not None:
+                    onu.hidden_duplicate = True
+                    for old_mac in macs_by_onu.get(onu.id, []):
+                        await s.delete(old_mac)
+                    await s.execute(delete(OnuWanIp).where(OnuWanIp.onu_id == onu.id))
+                continue
+            seen_macs.add(mac)
+            if onu is None:
+                onu = ONU(olt_id=olt_id, shelf=0, slot=slot, pon=pon, onu_number=number)
+                s.add(onu)
+            previous_identity = (onu.sn or "") if onu else ""
+            onu.hidden_duplicate = False
+            formatted_mac = ":".join(mac[i:i + 2] for i in range(0, 12, 2))
+            state = item.get("state", "")
+            status = "online" if state == "1" else "offline" if state == "2" else "unknown"
+            try:
+                rx = float(item.get("rx", ""))
+                if rx == 0:
+                    rx = None
+            except ValueError:
+                rx = None
+            name = item.get("name", "").strip()
+            if name and (not onu.name or onu.name == onu.cfg_name):
+                onu.name = name
+            if name:
+                onu.cfg_name = name
+            if onu.status != status:
+                onu.status_changed_at = now
+            onu.sn = formatted_mac
+            onu.status, onu.phase_state, onu.rx_power, onu.updated_at = status, state, rx, now
+            if onu.id is None:
+                await s.flush()
+            await _sync_onu_mac_cache(
+                s, onu, previous_identity, formatted_mac,
+                learned_by_onu.get((slot, pon, number), []) if learned_by_onu is not None else None,
+                macs_by_onu, now,
+            )
+        olt.status, olt.poll_source, olt.last_poll_at = "online", "snmp", now
+        olt.last_full_sync_at = now
+        olt.sys_descr, olt.uptime_s = info["sys_descr"], info["uptime_s"]
+        mac_note = (
+            f"; {sum(map(len, learned_by_onu.values()))} learned client MACs"
+            if learned_by_onu is not None else
+            "; learned-MAC scan failed, previous MAC cache retained"
+        )
+        olt.status_msg = f"C-Data EPON SNMP sync OK: {len(data)} ONUs (read-only){mac_note}"
+        await s.commit()
+        await bus.publish(olt_event(olt))
+        await _publish_counts(s, olt_id)
+        await bus.publish({"type": "onus_reload", "olt_id": olt_id})
+
+
 async def run_full_sync(olt_id: int) -> None:
     async with SessionLocal() as s:
         olt = await s.get(OLT, olt_id)
         if not olt:
             return
-        olt.status, olt.status_msg, olt.sync_requested = "syncing", "Reading running-config and ONU status…", False
+        start_msg = ("Reading HIOSO SNMP ONU data and CLI MAC table (read-only)…" if olt.vendor == "hioso" else
+                     "Reading C-Data EPON SNMP ONU data (read-only)…" if olt.vendor == "cdata" else
+                     "Reading running-config and ONU status…")
+        olt.status, olt.status_msg, olt.sync_requested = "syncing", start_msg, False
         await s.commit()
         await bus.publish(olt_event(olt))
+        if olt.vendor == "cdata":
+            try:
+                client = cdata.client_from_row(olt)
+            except ValueError as exc:
+                olt.status, olt.status_msg = "offline", str(exc)[:300]
+                await s.commit()
+                await bus.publish(olt_event(olt))
+                return
+            is_cdata = True
+        else:
+            is_cdata = False
+        if olt.vendor == "hioso":
+            try:
+                client = hioso.client_from_row(olt)
+            except ValueError as exc:
+                olt.status, olt.status_msg = "offline", str(exc)[:300]
+                await s.commit()
+                await bus.publish(olt_event(olt))
+                return
+            is_hioso = True
+        else:
+            is_hioso = False
+    if is_cdata:
+        await _cdata_full_sync(olt_id, client)
+        return
+    if is_hioso:
+        await _hioso_full_sync(olt_id, client, olt)
+        return
+    async with SessionLocal() as s:
+        olt = await s.get(OLT, olt_id)
+        if not olt:
+            return
         try:
             conn = zte.conn_from_row(olt)
         except ValueError as exc:
@@ -425,13 +691,12 @@ async def run_full_sync(olt_id: int) -> None:
             synced_onus[key] = o
         if mac_scanned:
             await s.flush()
-            mac_onu_ids = [synced_onus[key].id for key in mac_scanned if key in synced_onus]
+            successful_scans = [key for key in mac_scanned if key in synced_onus and mac_rows.get(key)]
+            mac_onu_ids = [synced_onus[key].id for key in successful_scans]
             if mac_onu_ids:
                 await s.execute(delete(OnuMacAddress).where(OnuMacAddress.onu_id.in_(mac_onu_ids)))
                 unique_macs = {}
-                for key in mac_scanned:
-                    if key not in synced_onus:
-                        continue
+                for key in successful_scans:
                     onu_id = synced_onus[key].id
                     for row in mac_rows.get(key, []):
                         unique_macs[(onu_id, row["mac"])] = row["mac"]
@@ -490,6 +755,131 @@ def effective_status(status: str, rx_now: tuple | None) -> str:
 
 
 async def poll_once(olt_id: int, tick: int, status_note: str = "") -> None:
+    async with SessionLocal() as s:
+        olt = await s.get(OLT, olt_id)
+        if not olt:
+            return
+        if olt.vendor == "cdata":
+            try:
+                client = cdata.client_from_row(olt)
+            except ValueError as exc:
+                olt.status, olt.status_msg = "offline", str(exc)[:300]
+                await s.commit()
+                await bus.publish(olt_event(olt))
+                return
+            is_cdata = True
+        else:
+            is_cdata = False
+        if olt.vendor == "hioso":
+            try:
+                client = hioso.client_from_row(olt)
+            except ValueError as exc:
+                olt.status, olt.status_msg = "offline", str(exc)[:300]
+                await s.commit()
+                await bus.publish(olt_event(olt))
+                return
+            is_hioso = True
+        else:
+            is_hioso = False
+    if is_cdata:
+        try:
+            data = await cdata.read_onus(client)
+            if not data:
+                raise SnmpError("C-Data EPON returned no valid ONU rows.")
+        except SnmpError as exc:
+            await _mark(olt_id, "offline", f"C-Data SNMP poll failed: {exc}")
+            return
+        now = utcnow()
+        async with SessionLocal() as s:
+            olt = await s.get(OLT, olt_id)
+            if not olt:
+                return
+            existing = {(o.shelf, o.slot, o.pon, o.onu_number): o
+                        for o in await s.scalars(select(ONU).where(ONU.olt_id == olt_id))}
+            changed, unknown = [], False
+            for (slot, pon, number), item in data.items():
+                onu = existing.get((0, slot, pon, number))
+                if onu is None:
+                    unknown = True
+                    continue
+                state = item.get("state", "")
+                status = "online" if state == "1" else "offline" if state == "2" else "unknown"
+                try:
+                    rx = float(item.get("rx", ""))
+                    if rx == 0:
+                        rx = None
+                except ValueError:
+                    rx = None
+                dirty = False
+                if onu.status != status or onu.phase_state != state:
+                    onu.status, onu.phase_state, onu.status_changed_at = status, state, now
+                    dirty = True
+                if onu.rx_power != rx:
+                    onu.rx_power, dirty = rx, True
+                if dirty:
+                    onu.updated_at = now
+                    changed.append({"id": onu.id, "status": status, "phase_state": state,
+                                    "rx_power": rx, "olt_rx_power": None})
+            olt.status, olt.poll_source, olt.last_poll_at = "online", "snmp", now
+            olt.status_msg = f"Poll SNMP OK: {len(data)} C-Data EPON ONUs, {len(changed)} changed (read-only)"
+            if unknown:
+                olt.sync_requested = True
+            await s.commit()
+            await bus.publish(olt_event(olt))
+            for i in range(0, len(changed), 200):
+                await bus.publish({"type": "onus", "olt_id": olt_id, "changes": changed[i:i + 200]})
+            if changed:
+                await _publish_counts(s, olt_id)
+        return
+    if is_hioso:
+        try:
+            data = await hioso.read_onus(client)
+        except SnmpError as exc:
+            await _mark(olt_id, "offline", f"HIOSO SNMP poll failed: {exc}")
+            return
+        now = utcnow()
+        async with SessionLocal() as s:
+            olt = await s.get(OLT, olt_id)
+            if not olt:
+                return
+            existing = {(o.shelf, o.slot, o.pon, o.onu_number): o
+                        for o in await s.scalars(select(ONU).where(ONU.olt_id == olt_id))}
+            changed, unknown = [], False
+            for (pon, number), item in data.items():
+                onu = existing.get((olt.shelf, 1, pon, number))
+                if onu is None:
+                    unknown = True
+                    continue
+                state = item.get("state", "")
+                status = "online" if state == "1" else "offline" if state == "2" else "unknown"
+                try:
+                    rx = float(item.get("rx", ""))
+                    if item.get("rx", "").casefold() == "na" or rx == 0:
+                        rx = None
+                except ValueError:
+                    rx = None
+                dirty = False
+                if onu.status != status or onu.phase_state != state:
+                    onu.status, onu.phase_state, onu.status_changed_at = status, state, now
+                    dirty = True
+                if onu.rx_power != rx:
+                    onu.rx_power = rx
+                    dirty = True
+                if dirty:
+                    onu.updated_at = now
+                    changed.append({"id": onu.id, "status": onu.status, "phase_state": state,
+                                    "rx_power": onu.rx_power, "olt_rx_power": None})
+            olt.status, olt.poll_source, olt.last_poll_at = "online", "snmp", now
+            olt.status_msg = f"Poll SNMP OK: {len(data)} HIOSO ONUs, {len(changed)} changed (read-only)"
+            if unknown:
+                olt.sync_requested = True
+            await s.commit()
+            await bus.publish(olt_event(olt))
+            for i in range(0, len(changed), 200):
+                await bus.publish({"type": "onus", "olt_id": olt_id, "changes": changed[i:i + 200]})
+            if changed:
+                await _publish_counts(s, olt_id)
+        return
     async with SessionLocal() as s:
         olt = await s.get(OLT, olt_id)
         if not olt:
@@ -595,6 +985,8 @@ async def do_save(olt_id: int) -> tuple[bool, str]:
         olt = await s.get(OLT, olt_id)
         if not olt:
             return False, "OLT not found"
+        if olt.vendor != "zte":
+            return False, f"Config saves are not supported for read-only {olt.vendor.upper()} OLTs."
         olt.last_save_attempt_at = utcnow()
         await s.commit()
         try:
