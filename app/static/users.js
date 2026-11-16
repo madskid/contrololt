@@ -1,12 +1,17 @@
 const dialog = $("#user-dialog"), form = $("#user-form");
-let users = [];
+let users = [], olts = [];
 
-const roleLabel = role => role === "administrator" ? "Administrator" : "Read only";
+const roleLabel = role => ({administrator: "Administrator", read_only: "Read only",
+  olt_limited: "OLT limited"})[role] || role;
 
 async function loadUsers() {
-  users = await api("/api/users");
+  [users, olts] = await Promise.all([api("/api/users"), api("/api/users/olt-options")]);
+  form.elements.olt_ids.innerHTML = olts.map(olt =>
+    `<option value="${olt.id}">${esc(olt.name)}</option>`).join("");
+  const oltNames = new Map(olts.map(olt => [olt.id, olt.name]));
   $("#users").innerHTML = users.map(user => `<tr>
-    <td>${esc(user.username)}</td><td>${roleLabel(user.role)}</td>
+    <td>${esc(user.username)}</td><td>${roleLabel(user.role)}${user.role === "olt_limited"
+      ? `<div class="muted small">${user.olt_ids.map(id => esc(oltNames.get(id) || `OLT ${id}`)).join(", ")}</div>` : ""}</td>
     <td>${user.created_at ? new Date(user.created_at).toLocaleString("en-US") : "—"}</td>
     <td class="row">
       <button class="sm" data-edit="${user.id}">Edit</button>
@@ -23,10 +28,17 @@ function openUser(user = null) {
   form.elements.password.value = "";
   form.elements.password.placeholder = user ? "Leave blank to keep the current password" : "";
   form.elements.role.value = user?.role || "read_only";
+  [...form.elements.olt_ids.options].forEach(option => {
+    option.selected = (user?.olt_ids || []).includes(+option.value);
+  });
+  $("#user-olt-field").hidden = form.elements.role.value !== "olt_limited";
   form.querySelector("button.primary").textContent = user ? "Save changes" : "Create user";
   dialog.showModal();
 }
 
+form.elements.role.onchange = () => {
+  $("#user-olt-field").hidden = form.elements.role.value !== "olt_limited";
+};
 $("#user-add").onclick = () => openUser();
 $("#user-cancel").onclick = () => dialog.close();
 $("#users").onclick = async event => {
@@ -46,7 +58,8 @@ $("#users").onclick = async event => {
 form.onsubmit = async event => {
   event.preventDefault();
   const id = form.dataset.id, password = form.elements.password.value;
-  const body = {role: form.elements.role.value};
+  const body = {role: form.elements.role.value,
+    olt_ids: [...form.elements.olt_ids.selectedOptions].map(option => +option.value)};
   if (id) {
     if (password) body.password = password;
   } else {

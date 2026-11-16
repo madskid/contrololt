@@ -1,14 +1,15 @@
-let OLTS = new Map(), META = null, editingId = null;
+let OLTS = new Map(), META = null, ROUTERS = [], editingId = null;
 const dlg = $("#olt-dialog"), form = $("#olt-form");
 
 function row(o) {
-  const save = o.last_save_at ? ago(o.last_save_at) + (o.last_save_ok === false ? " ⚠" : "") : (o.last_save_ok === false ? "failed ⚠" : "never");
+  const save = ["hioso", "cdata"].includes(o.vendor) ? (o.write_enabled ? "limited actions" : "read-only") :
+    (o.last_save_at ? ago(o.last_save_at) + (o.last_save_ok === false ? " ⚠" : "") : (o.last_save_ok === false ? "failed ⚠" : "never"));
   return `<tr data-id="${o.id}"><td>${o.id}</td><td>${badge(o.status)}</td>
   <td><a href="/olts/${o.id}"><b>${esc(o.name)}</b></a><div class="muted small" title="${esc(o.status_msg)}">${esc((o.status_msg || "").slice(0, 70))}</div></td>
-  <td>${esc(o.ip)}</td><td>${o.telnet_port}</td><td>${o.snmp_port}</td><td>${esc(o.hw_version)}</td><td>${esc(o.sw_version) || "—"}</td>
+  <td>${esc(o.ip)}</td><td>${["hioso", "cdata"].includes(o.vendor) ? "—" : o.telnet_port}</td><td>${o.snmp_port}</td><td>${esc(o.hw_version)}</td><td>${esc(o.sw_version) || "—"}</td>
   <td class="num">${o.counts.total}</td><td>${o.write_enabled ? '<span class="badge st-online">ON</span>' : '<span class="muted">off</span>'}</td><td>${ago(o.last_poll_at)}${o.poll_source ? ` <span class="muted small">(${esc(o.poll_source)})</span>` : ""}</td>
   <td title="${esc(o.last_save_msg)}">${save}</td>
-  <td class="row"><a class="btn" href="/olts/${o.id}">View</a><button class="sm" data-act="sync">Sync</button><button class="sm" data-act="save">Save</button>
+  <td class="row"><a class="btn" href="/olts/${o.id}">View</a><button class="sm" data-act="sync">Sync</button>${o.vendor !== "zte" ? "" : '<button class="sm" data-act="save">Save</button>'}
   <button class="sm" data-act="edit">Edit</button>  <button class="sm danger" data-act="del">Delete</button></td></tr>`;
 }
 function render() {
@@ -19,26 +20,63 @@ function render() {
   $("#olt-empty").hidden = OLTS.size > 0;
 }
 async function load() {
-  const [list, meta] = await Promise.all([api("/api/olts"), META || api("/api/meta")]);
-  META = meta; OLTS = new Map(list.map(o => [o.id, o])); render(); fillModels();
+  const [list, meta, routers] = await Promise.all([
+    api("/api/olts"), META || api("/api/meta"), api("/api/mikrotik/routers"),
+  ]);
+  META = meta; ROUTERS = routers; OLTS = new Map(list.map(o => [o.id, o])); render(); fillModels();
 }
 function fillModels() {
   const sel = form.elements.model_sel; if (sel.options.length) return;
   META.models.forEach(m => sel.add(new Option(m.label, m.key)));
   sel.add(new Option("Other (enter manually)…", "__manual__"));
   Object.entries(META.families).forEach(([k, v]) => form.elements.cli_family.add(new Option(v, k)));
-  sel.onchange = syncModelUI; syncModelUI();
+  form.elements.mikrotik_router_id.add(new Option("Auto-match by OLT/router name", ""));
+  ROUTERS.forEach(router => form.elements.mikrotik_router_id.add(new Option(router.name, router.id)));
+  sel.onchange = syncModelUI;
+  form.elements.write_enabled.onchange = syncModelUI;
+  syncModelUI();
 }
 function syncModelUI() {
   const manual = form.elements.model_sel.value === "__manual__";
-  $("#model-manual-wrap").hidden = !manual; $("#family-wrap").hidden = !manual;
+  const preset = META.models.find(m => m.key === form.elements.model_sel.value);
+  const isHioso = preset?.vendor === "hioso";
+  const isCdata = preset?.vendor === "cdata";
+  $("#mikrotik-router-wrap").hidden = !isCdata;
+  $("#model-manual-wrap").hidden = !manual; $("#family-wrap").hidden = !manual || isHioso;
+  $("#telnet-port-wrap").hidden = isHioso; $("#telnet-user-wrap").hidden = isHioso;
+  $("#telnet-pass-wrap").hidden = isHioso; $("#enable-pass-wrap").hidden = isHioso;
+  form.elements.telnet_user.required = !isHioso && !isCdata || form.elements.write_enabled.checked && isHioso;
+  form.elements.telnet_pass.required = !isCdata && !isHioso && (!editingId || OLTS.get(editingId)?.vendor === "hioso");
+  if (isHioso) {
+    const savedTelnetPassword = editingId && OLTS.get(editingId)?.telnet_configured;
+    form.elements.telnet_pass.required = form.elements.write_enabled.checked && !savedTelnetPassword;
+    $("#write-enabled-label").textContent = "Enable HIOSO ONU rename and reboot from the dashboard";
+  } else {
+    $("#write-enabled-label").textContent = isCdata ? "C-Data changes are not supported" :
+      "Allow changes to this OLT from the dashboard (ONU registration, VLAN, reboot, etc.)";
+  }
+  $("#write-enabled-wrap").hidden = isCdata;
+  form.elements.write_enabled.disabled = isCdata;
+  if (isCdata) form.elements.write_enabled.checked = false;
+  if (isHioso && !editingId && ["", "public"].includes(form.elements.snmp_community.value)) {
+    form.elements.snmp_community.value = "SNMPREAD";
+  }
+  $("#hioso-readonly-hint").hidden = !isHioso;
+  $("#cdata-readonly-hint").hidden = !isCdata;
 }
 function payload() {
   const f = form.elements, manual = f.model_sel.value === "__manual__";
+  const selected = META.models.find(m => m.key === f.model_sel.value);
   const p = {name: f.name.value, ip: f.ip.value, model: manual ? f.model_manual.value : f.model_sel.value,
-    shelf: +f.shelf.value, telnet_port: +f.telnet_port.value, telnet_user: f.telnet_user.value,
-    telnet_pass: f.telnet_pass.value, enable_pass: f.enable_pass.value,
+    vendor: selected?.vendor || "zte",
+    shelf: +f.shelf.value, telnet_port: +f.telnet_port.value,
     snmp_community: f.snmp_community.value, snmp_port: +f.snmp_port.value, write_enabled: f.write_enabled.checked};
+  if (selected?.vendor === "cdata") {
+    p.mikrotik_router_id = f.mikrotik_router_id.value ? +f.mikrotik_router_id.value : null;
+  }
+  p.telnet_user = f.telnet_user.value;
+  p.telnet_pass = f.telnet_pass.value;
+  p.enable_pass = f.enable_pass.value;
   if (manual) p.cli_family = f.cli_family.value;
   return p;
 }
@@ -53,6 +91,7 @@ function openDialog(o) {
     form.elements.model_sel.value = known ? o.model : "__manual__";
     if (!known) { form.elements.model_manual.value = o.model; form.elements.cli_family.value = o.cli_family; }
     form.elements.snmp_community.value = ""; form.elements.write_enabled.checked = !!o.write_enabled;
+    form.elements.mikrotik_router_id.value = o.mikrotik_router_id || "";
   }
   syncModelUI(); dlg.showModal();
 }
@@ -61,9 +100,11 @@ $("#btn-cancel").onclick = () => dlg.close();
 $("#btn-test").onclick = async () => {
   const out = $("#test-out"); out.hidden = false; out.textContent = "Testing SNMP & Telnet…";
   try {
-    const p = payload();     if (editingId && !p.telnet_pass) throw new Error("Enter the Telnet password to test the connection");
+    const p = payload(); if (p.vendor === "zte" && editingId && !p.telnet_pass) throw new Error("Enter the Telnet password to test the connection");
+    if (p.vendor === "hioso" && (!!p.telnet_user !== !!p.telnet_pass)) throw new Error("Enter both HIOSO Telnet username and password to test the CLI.");
+    if (p.vendor === "cdata" && (!!p.telnet_user !== !!p.telnet_pass)) throw new Error("Enter both C-Data Telnet username and password to test the CLI.");
     const r = await api("/api/olts/test", {method: "POST", body: p});
-    out.textContent = `SNMP  : ${r.snmp_ok ? "OK" : "FAILED"} — ${r.snmp_msg}\nTelnet: ${r.telnet_ok ? "OK" : "FAILED"} — ${r.telnet_msg}` +
+    out.textContent = `SNMP  : ${r.snmp_ok ? "OK" : "FAILED"} — ${r.snmp_msg}\n${r.telnet_msg ? `Telnet: ${r.telnet_ok ? "OK" : "N/A"} — ${r.telnet_msg}` : ""}` +
       (r.sys_descr ? `\nsysDescr: ${r.sys_descr}` : "");
   } catch (e) { out.textContent = "Error: " + e.message; }
 };
@@ -72,10 +113,10 @@ form.onsubmit = async ev => {
   const btn = $("#btn-save"); btn.disabled = true;
   try {
     const p = payload();
-    if (editingId) { ["telnet_pass", "enable_pass", "snmp_community"].forEach(k => { if (!p[k]) delete p[k]; }); }
+    if (editingId) { ["telnet_user", "telnet_pass", "enable_pass", "snmp_community"].forEach(k => { if (!p[k]) delete p[k]; }); }
     const o = await api(editingId ? `/api/olts/${editingId}` : "/api/olts", {method: editingId ? "PUT" : "POST", body: p});
     OLTS.set(o.id, o); render(); dlg.close();
-    toast(editingId ? "OLT updated; scheduling a resync…" : "OLT added — retrieving SNMP, running-config, and all ONUs…");
+    toast(editingId ? "OLT updated; scheduling a resync…" : (o.vendor !== "zte" ? `${o.vendor.toUpperCase()} OLT added — starting SNMP sync…` : "OLT added — retrieving SNMP, running-config, and all ONUs…"));
   } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
 };
 $("#olt-table").addEventListener("click", async ev => {

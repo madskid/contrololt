@@ -58,8 +58,20 @@ async def read_move_config(onu: ONU, olt: OLT) -> dict:
     ul = item["up_profile"] or (profiles.get(onu.ul_profile_id).name if onu.ul_profile_id in profiles else "")
     dl = item["dl_profile"] or (profiles.get(onu.dl_profile_id).name if onu.dl_profile_id in profiles else "")
     vlan = item["vlan"] or onu.vlan
-    if not onu_type or not vlan or not ul or not dl:
-        raise V.PlanError("Source configuration is missing ONU type, VLAN, or speed profile; cannot safely schedule this move.")
+    missing = []
+    if not onu_type:
+        missing.append("ONU type")
+    if not vlan:
+        missing.append("VLAN")
+    if not ul:
+        missing.append("upload speed profile")
+    if not dl:
+        missing.append("download speed profile")
+    if missing:
+        raise V.PlanError(
+            f"Cannot safely copy the ONU configuration; missing {', '.join(missing)} "
+            "in the OLT configuration and dashboard."
+        )
     return {
         "sn": onu.sn.strip().upper(),
         "onu_type": onu_type,
@@ -102,8 +114,12 @@ async def _execute_move(job_id: int) -> None:
         actor_target = f"{job.sn} {job.source_slot}/{job.source_pon} -> {job.target_slot}/{job.target_pon}"
         if not source or not target or not onu:
             raise V.PlanError("Source ONU or source/destination OLT no longer exists.")
+        if source.id != target.id:
+            raise V.PlanError("Automatic ONU moves are only supported within the same OLT. Delete the old registration and authorize the ONU on the new OLT.")
+        if source.vendor != "zte" or target.vendor != "zte":
+            raise V.PlanError("Automatic ONU moves are currently supported only for ZTE OLTs.")
         if not source.write_enabled or not target.write_enabled:
-            raise V.PlanError("Source and destination OLTs must both have OLT writes enabled.")
+            raise V.PlanError("Allow changes to OLT must be enabled.")
         if onu.olt_id != source.id or (onu.slot, onu.pon, onu.onu_number, onu.sn.upper()) != (
                 job.source_slot, job.source_pon, job.source_onu_number, job.sn.upper()):
             raise V.PlanError("ONU source position or serial changed after this move was scheduled.")

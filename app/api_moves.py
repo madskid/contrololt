@@ -50,8 +50,14 @@ async def schedule_move(b: MoveScheduleIn, user: str = Depends(require_admin), s
     source = await s.get(OLT, onu.olt_id)
     if not target:
         raise HTTPException(404, "Destination OLT not found")
-    if not source or not source.write_enabled or not target.write_enabled:
-        raise HTTPException(409, "Allow changes to OLT must be enabled on both source and destination OLTs.")
+    if not source:
+        raise HTTPException(404, "Source OLT not found")
+    if source.id != target.id:
+        raise HTTPException(409, "Automatic moves are only supported within the same OLT. Delete the ONU on the old OLT first, then authorize it on the new OLT.")
+    if source.vendor != "zte" or target.vendor != "zte":
+        raise HTTPException(409, "Automatic ONU moves are currently supported only for ZTE OLTs.")
+    if not source.write_enabled or not target.write_enabled:
+        raise HTTPException(409, "Allow changes to OLT must be enabled on the OLT.")
     if (source.id == target.id and (onu.slot, onu.pon) == (b.target_slot, b.target_pon)):
         raise HTTPException(422, "Source and destination PON interfaces are the same.")
     in_progress = (await s.scalars(select(OnuMoveJob.id).where(

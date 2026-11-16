@@ -1,5 +1,7 @@
 const id = window.ONU_ID, loaded = {};
 let timer = null, last = null, series = {in: [], out: []}, signalSeries = [], statusRequest = 0;
+let currentOnu = null;
+let headerWanRefreshInProgress = false;
 let headerRxWarn = -30, headerRxCrit = -32;
 const fmtBps = v => v == null ? "—" : v >= 1e9 ? (v / 1e9).toFixed(2) + " Gbps" : v >= 1e6 ? (v / 1e6).toFixed(2) + " Mbps" : v >= 1e3 ? (v / 1e3).toFixed(1) + " kbps" : v + " bps";
 const dbm = v => v == null ? "—" : v.toFixed(2) + " dBm";
@@ -54,36 +56,128 @@ async function refreshHeaderStatus() {
 
 async function header() {
   const editable = window.USER_ROLE === "administrator";
-  const [o, f] = await Promise.all([api(`/api/onus/${id}`), api("/api/filters")]);
+  const oltLimited = window.USER_ROLE === "olt_limited";
+  const o = await api(`/api/onus/${id}`);
+  currentOnu = o;
+  if (o.olt.vendor === "cdata") {
+    headerRxWarn = o.olt.rx_warn ?? -30;
+    headerRxCrit = o.olt.rx_crit ?? -32;
+    $$("#tabs button[data-tab]").forEach(b => { b.hidden = b.dataset.tab !== "status"; });
+    $$("#tabs button[data-act]").forEach(b => { b.hidden = true; });
+    ["tab-config", "tab-sw", "tab-traffic", "tab-eth", "speed-profiles", "wifi-panel"]
+      .forEach(selector => { const section = $("#" + selector); if (section) section.hidden = true; });
+    $("#info").innerHTML = `<div class="infogrid">
+      <div class="onu-info-col"><label><span>OLT</span>${esc(o.olt.name)}</label>
+        <label><span>Vendor / model</span>C-DATA ${esc(o.olt.model)}</label>
+        <label><span>EPON port / ONU</span>${esc(o.interface)}</label>
+        <label><span>ONU MAC</span>${esc(o.sn || "—")}</label></div>
+      <div class="onu-info-col"><label><span>Status</span><span class="onu-header-status"><span id="onu-header-badge">${badge(o.status)}</span> <small id="onu-header-phase" class="muted">${esc(o.phase_state)}</small></span></label>
+        <label><span>ONU Rx</span><b id="onu-header-rx">${rx(opticalValue(o.status, o.rx_power), headerRxWarn, headerRxCrit)} / — dBm</b></label>
+        <label><span>WAN IP / Remote Web</span><span id="onu-wan-ip" class="muted small">Checking active PPPoE…</span></label>
+        <label><span>PPPoE username</span><code id="onu-pppoe-user" data-configured="">—</code></label>
+        <label><span>Integration mode</span>Read-only SNMP monitoring</label></div></div>`;
+    show("status");
+    loadHeaderWanIp();
+    return;
+  }
+  if (oltLimited) {
+    headerRxWarn = o.olt.rx_warn ?? -30;
+    headerRxCrit = o.olt.rx_crit ?? -32;
+    const canReboot = !!o.olt.write_enabled;
+    $$("#tabs button[data-tab]").forEach(b => { b.hidden = b.dataset.tab !== "status"; });
+    $$("#tabs button[data-act]").forEach(b => { b.hidden = b.dataset.act !== "reboot" || !canReboot; });
+    ["tab-config", "tab-sw", "tab-traffic", "tab-eth", "speed-profiles", "wifi-panel"]
+      .forEach(selector => { const section = $("#" + selector); if (section) section.hidden = true; });
+    $("#info").innerHTML = `<div class="infogrid">
+      <div class="onu-info-col"><label><span>OLT</span>${esc(o.olt.name)}</label>
+        <label><span>Port / ONU</span>${esc(o.interface)}</label>
+        <label><span>Name</span>${esc(o.name || "—")}</label>
+        <label><span>SN / MAC</span>${esc(o.sn || "—")}</label>
+        <label><span>ONU type</span>${esc(o.onu_type || "—")}</label></div>
+      <div class="onu-info-col"><label><span>Status</span><span class="onu-header-status"><span id="onu-header-badge">${badge(o.status)}</span> <small id="onu-header-phase" class="muted">${esc(o.phase_state)}</small></span></label>
+        <label><span>ONU Rx</span><b id="onu-header-rx">${rx(opticalValue(o.status, o.rx_power), headerRxWarn, headerRxCrit)} / — dBm</b></label></div></div>`;
+    show("status");
+    return;
+  }
+  if (o.olt.vendor === "hioso") {
+    headerRxWarn = o.olt.rx_warn ?? -30;
+    headerRxCrit = o.olt.rx_crit ?? -32;
+    const hiosoActionsEnabled = editable && o.olt.write_enabled;
+    const hiosoRebootEnabled = hiosoActionsEnabled;
+    $$("#tabs button[data-tab]").forEach(b => { b.hidden = b.dataset.tab !== "status"; });
+    $$("#tabs button[data-act]").forEach(b => { b.hidden = b.dataset.act !== "reboot" || !hiosoRebootEnabled; });
+    $("#speed-profiles").hidden = true; $("#wifi-panel").hidden = true;
+    $("#info").innerHTML = `<div class="infogrid">
+      <div class="onu-info-col"><label><span>OLT</span><a href="/olts/${o.olt.id}">${esc(o.olt.name)}</a></label>
+        <label><span>Vendor / model</span>${esc(o.olt.vendor.toUpperCase())} ${esc(o.olt.model)}</label>
+        <label><span>EPON port / ONU</span>${esc(o.interface)}</label>
+        <label><span>Name</span>${hiosoActionsEnabled
+        ? `<span class="row gap"><input id="e-name" maxlength="32" value="${esc(o.name || "")}"><button type="button" class="sm" id="b-hioso-rename">Rename ONT</button></span>`
+          : esc(o.name || "—")}</label>
+        <label><span>ONU MAC</span>${esc(o.sn || "—")}</label></div>
+      <div class="onu-info-col"><label><span>Status</span><span class="onu-header-status"><span id="onu-header-badge">${badge(o.status)}</span> <small id="onu-header-phase" class="muted">${esc(o.phase_state)}</small></span></label>
+        <label><span>ONU Rx</span><b id="onu-header-rx">${rx(opticalValue(o.status, o.rx_power), headerRxWarn, headerRxCrit)} / — dBm</b></label>
+        <label><span>WAN IP / Remote Web</span><span id="onu-wan-ip" class="muted small">Checking active PPPoE…</span></label>
+        <label><span>PPPoE username</span><code id="onu-pppoe-user" data-configured="${esc(o.pppoe_user || "")}">${esc(o.pppoe_user || "—")}</code></label>
+        <label><span>Integration mode</span>${hiosoActionsEnabled
+          ? "SNMP monitoring + Telnet detail + confirmed rename/reboot"
+          : o.olt.telnet_configured ? "SNMP monitoring + read-only Telnet detail" : "SNMP read-only"}</label></div></div>`;
+    if (hiosoActionsEnabled) {
+      $("#e-name").title = "Up to 32 characters. Spaces and unsupported characters are converted to underscores.";
+      $("#b-hioso-rename").onclick = async () => {
+        const name = $("#e-name").value.trim();
+        if (!name) return toast("Enter a name for this ONU.", true);
+        if (!confirm(`Rename ONT ${o.interface} to "${name}" on ${o.olt.name}?`)) return;
+        const button = $("#b-hioso-rename");
+        button.disabled = true;
+        try {
+          await api(`/api/onus/${id}/hioso/rename`, {method: "POST", body: {name, confirm: true}});
+          toast("ONT renamed on the HIOSO OLT.");
+          try { await header(); }
+          catch (e) { toast(`ONT was renamed, but the page could not refresh: ${e.message}`, true); }
+        } catch (e) { toast(e.message, true); }
+        finally { if ($("#b-hioso-rename")) $("#b-hioso-rename").disabled = false; }
+      };
+    }
+    show("status");
+    loadHeaderWanIp();
+    return;
+  }
+  const f = await api("/api/filters");
   const types = await api(`/api/onu-types?q=${encodeURIComponent(o.onu_type)}`);
   headerRxWarn = o.olt.rx_warn ?? -30;
   headerRxCrit = o.olt.rx_crit ?? -32;
-  $("#onu-title").textContent = o.name || o.sn || `ONU ${o.location}`;
   const opt = (arr, cur) => '<option value="">—</option>' + arr.map(x => `<option value="${x.id}" ${x.id === cur ? "selected" : ""}>${esc(x.name)}</option>`).join("");
   const prof = d => f.profiles.filter(p => p.direction === d);
   $("#info").innerHTML = `<div class="infogrid">
-    <label><span>OLT</span><b>${editable ? `<a href="/olts/${o.olt.id}">${esc(o.olt.name)}</a>` : esc(o.olt.name)}</b></label>
-    <label><span>Status</span><span class="onu-header-status"><span id="onu-header-badge">${badge(o.status)}</span> <small id="onu-header-phase" class="muted">${esc(o.phase_state)}</small></span></label>
-    <label><span>Board</span>${o.slot}</label>
-    <label><span>ONU/OLT Rx signal</span><b id="onu-header-rx">${rx(opticalValue(o.status, o.rx_power), o.olt.rx_warn, o.olt.rx_crit)} / ${rx(opticalValue(o.status, o.olt_rx_power), o.olt.rx_warn, o.olt.rx_crit)} dBm</b></label>
-    <label><span>Port</span>${o.pon}</label>
-    <label><span>Attached VLANs</span>${o.vlan ?? "—"}</label>
-    <label><span>Mgmt IP</span>${o.mgmt_ip ? esc(o.mgmt_ip) + " (vlan " + o.mgmt_vlan + ")" : "—"}</label>
-    <label><span>ONU</span>${esc(o.interface)}</label>
-    <label><span>ONU mode</span><b>${o.mode === "routing" ? "Routing" : o.mode === "bridge" ? "Bridging" : "—"}${o.mode === "routing" && o.vlan ? " - WAN VLAN: " + o.vlan : ""}</b> ${editable ? '<button type="button" class="sm" id="b-mode">Update ONU mode</button>' : ""}</label>
-    <label><span>SN</span>${esc(o.sn)} ${editable ? '<button type="button" class="sm" id="b-replace-sn">Replace SN</button>' : ""}</label>
-    <label><span>WAN setup mode</span>${esc((o.conn_type || "—").toUpperCase())}</label>
-    <label><span>ONU type</span>${esc(o.onu_type)}</label>
-    <label><span>PPPoE username</span><code id="pu" data-u="${esc(o.pppoe_user)}">${o.pppoe_user ? "••••••••••" : "—"}</code> <button type="button" class="sm" id="eye">👁</button> ${editable && o.mode === "routing" ? '<button type="button" class="sm" id="b-pppoe">Edit credentials</button>' : ""}</label>
-    <label><span>Zone</span>${editable ? `<select id="e-zone">${opt(f.zones, o.zone_id)}</select>` : esc(o.zone || "—")}</label>
-    <label><span>ODB (Splitter)</span>${editable ? `<select id="e-odb">${opt(f.odbs, o.odb_id)}</select>` : esc(o.odb || "—")}</label>
-    <label><span>Name</span>${editable ? `<input id="e-name" maxlength="64" value="${esc(o.name)}">` : esc(o.name || "—")}</label>
-    <label><span>Distance</span>${o.distance_m == null ? "—" : o.distance_m + " m"}</label>
-    <label><span>Address or comment</span>${editable ? `<input id="e-addr" maxlength="300" value="${esc(o.address)}">` : esc(o.address || "—")}</label>
-    <label><span>Authorization date</span>${fmtDate(o.auth_date)}</label>
-    <label><span>Contact</span>${editable ? `<input id="e-contact" maxlength="100" value="${esc(o.contact)}">` : esc(o.contact || "—")}</label>
-    <label><span>ONU external ID</span>${editable ? `<input id="e-ext" maxlength="64" value="${esc(o.external_id)}">` : esc(o.external_id || "—")}</label></div>
-    ${editable ? `<div class="row between pad"><span class="muted small">Name changes are sent to the OLT after confirmation. Zone, ODB, address, contact, and speed profiles are stored only in the dashboard.</span>
+    <div class="onu-info-col">
+      <label><span>OLT</span><b>${editable ? `<a href="/olts/${o.olt.id}">${esc(o.olt.name)}</a>` : esc(o.olt.name)}</b></label>
+      <label><span>Board</span>${o.slot}</label>
+      <label><span>Port</span>${o.pon}</label>
+      <label><span>Mgmt IP</span>${o.mgmt_ip ? esc(o.mgmt_ip) + " (vlan " + o.mgmt_vlan + ")" : "—"}</label>
+      <label><span>ONU mode</span><b>${o.mode === "routing" ? "Routing" : o.mode === "bridge" ? "Bridging" : "—"}${o.mode === "routing" && o.vlan ? " - WAN VLAN: " + o.vlan : ""}</b> ${editable ? '<button type="button" class="sm" id="b-mode">Update ONU mode</button>' : ""}</label>
+      <label><span>WAN setup mode</span>${esc((o.conn_type || "—").toUpperCase())}</label>
+      <label><span>Zone</span>${editable ? `<select id="e-zone">${opt(f.zones, o.zone_id)}</select>` : esc(o.zone || "—")}</label>
+      <label><span>ODB (Splitter)</span>${editable ? `<select id="e-odb">${opt(f.odbs, o.odb_id)}</select>` : esc(o.odb || "—")}</label>
+      <label><span>Contact</span>${editable ? `<input id="e-contact" maxlength="100" value="${esc(o.contact)}">` : esc(o.contact || "—")}</label>
+      <label><span>ONU external ID</span>${editable ? `<input id="e-ext" maxlength="64" value="${esc(o.external_id)}">` : esc(o.external_id || "—")}</label>
+    </div>
+    <div class="onu-info-col">
+      <label><span>Status</span><span class="onu-header-status"><span id="onu-header-badge">${badge(o.status)}</span> <small id="onu-header-phase" class="muted">${esc(o.phase_state)}</small></span></label>
+      <label><span>ONU/OLT Rx signal</span><b id="onu-header-rx">${rx(opticalValue(o.status, o.rx_power), o.olt.rx_warn, o.olt.rx_crit)} / ${rx(opticalValue(o.status, o.olt_rx_power), o.olt.rx_warn, o.olt.rx_crit)} dBm</b></label>
+      <label><span>Attached VLANs</span>${o.vlan ?? "—"}</label>
+      <label><span>ONU</span>${esc(o.interface)}</label>
+      <label><span>SN</span>${esc(o.sn)} ${editable ? '<button type="button" class="sm" id="b-replace-sn">Replace SN</button>' : ""}</label>
+      <label><span>ONU type</span>${esc(o.onu_type)}</label>
+      <label><span>WAN IP / Remote Web</span><span id="onu-wan-ip" class="muted small">Checking active PPPoE…</span></label>
+      <label><span>PPPoE username</span><code id="onu-pppoe-user" data-configured="${esc(o.pppoe_user || "")}">${esc(o.pppoe_user || "—")}</code> ${editable && o.mode === "routing" ? '<button type="button" class="sm" id="b-pppoe">Edit credentials</button>' : ""}</label>
+      <label><span>Distance</span>${o.distance_m == null ? "—" : o.distance_m + " m"}</label>
+      <label><span>Authorization date</span>${fmtDate(o.auth_date)}</label>
+      <label><span>Name</span>${editable ? `<input id="e-name" maxlength="64" value="${esc(o.name)}">` : esc(o.name || "—")}</label>
+      <label><span>Address or comment</span>${editable ? `<input id="e-addr" maxlength="300" value="${esc(o.address)}">` : esc(o.address || "—")}</label>
+    </div>
+  </div>
+    ${editable ? `<div class="row between pad"><span class="muted small">${o.olt.cli_family === "c6xx" ? "For C600/C6xx, name and description are stored in the dashboard because the OLT may mask them during synchronization." : "Name changes are sent to the OLT after confirmation."} Zone, ODB, address, contact, and speed profiles are stored only in the dashboard.</span>
       <span class="row gap"><button class="primary" id="e-save">Save</button></span></div>` : ""}`;
   $("#speed-profiles").innerHTML = editable ? `<h3>Speed profiles</h3>
     <div class="scroll"><table><thead><tr><th>Download</th><th>Upload</th><th>Action</th></tr></thead><tbody><tr>
@@ -102,25 +196,38 @@ async function header() {
         `<tr><td>wifi_0/${i + 1}</td><td>—</td><td>—</td><td>—</td><td>—</td><td><span class="muted">Unavailable</span></td></tr>`).join("") :
         '<tr><td colspan="6" class="muted">No WiFi ports are recorded for this type.</td></tr>'}</tbody></table></div>
     <p class="small muted">Radio status, SSID, DHCP, and WiFi configuration are not available through the current OLT integration.</p>`;
-  if ($("#eye")) $("#eye").onclick = () => { const p = $("#pu"); p.textContent = p.textContent.includes("•") ? (p.dataset.u || "—") : (p.dataset.u ? "••••••••••" : "—"); };
   if (!editable) return;
   $("#b-replace-sn").onclick = async buttonEvent => {
     const button = buttonEvent.currentTarget;
     const values = await askForm({title: "Replace ONU serial number", submit: "Continue",
-      note: `The new ONU must be detected as unconfigured on ${o.olt.name}, board ${o.slot}, PON ${o.pon}. The current bridge service will be applied there, then the old registration removed. The dashboard SN and external ID will both be changed.`,
+      note: `Enter the new ONU SN manually. The OLT will briefly remove and re-register ONU ${o.slot}/${o.pon} at the same ONU index, then restore its captured service configuration. The service may be interrupted briefly.`,
       fields: [{k: "sn", label: "New ONU SN"}]});
     if (!values) return;
+    const dialog = $("#plan-dialog");
+    if (dialog.open) dialog.close();
     const newSn = values.sn.trim().toUpperCase();
-    if (!confirm(`Replace ONU SN ${o.sn} with ${newSn} at ${o.olt.name} ${o.slot}/${o.pon}? The old ONU registration will be removed after the new configuration is verified.`)) return;
+    if (!confirm(`Replace ONU SN ${o.sn} with ${newSn} at ${o.olt.name} ${o.slot}/${o.pon}? The ONU will be temporarily removed and re-registered. Its captured service configuration will be restored; service may be interrupted briefly.`)) return;
     button.disabled = true;
+    const originalLabel = button.textContent;
     try {
-      const result = await api(`/api/onus/${id}/replace-sn`, {method: "POST", body: {sn: newSn, confirm: true}});
-      toast(`ONU replaced: ${result.old_sn} → ${result.sn}; external ID updated.`);
+      button.textContent = "Replacing…";
+      const job = await api(`/api/onus/${id}/replace-sn`, {method: "POST", body: {sn: newSn, confirm: true}});
+      toast(`Replace SN started in the background for ${job.old_sn} → ${job.sn}.`);
+      let result;
+      do {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        result = await api(`/api/onu-replacements/${job.id}`);
+        button.textContent = result.status === "queued" ? "Queued…" : "Replacing…";
+      } while (result.status === "queued" || result.status === "running");
+      if (result.status !== "completed") throw new Error(result.message || "Replace SN failed.");
+      toast(`ONU replaced: ${result.old_sn} → ${result.sn}; service configuration restored.`);
+      if (!result.saved) toast(`SN updated on the OLT, but saving to OLT memory failed: ${result.save_message}`, true);
       await header();
     } catch (error) {
       toast(error.message, true);
     } finally {
       button.disabled = false;
+      button.textContent = originalLabel;
     }
   };
   if ($("#b-pppoe")) $("#b-pppoe").onclick = async () => {
@@ -135,15 +242,16 @@ async function header() {
     const opts = vl.rows.filter(v => v.vlan > 1 && (v.name || v.onus)).map(v => [v.vlan, `${v.vlan}${v.name ? " - " + v.name : ""}`]);
     if (o.vlan && !opts.some(x => x[0] === o.vlan)) opts.unshift([o.vlan, String(o.vlan)]);
     const routing = v => v.mode === "routing";
+    const routingSetup = v => routing(v) && o.mode !== "routing";
     const v = await askForm({title: "Update ONU mode", submit: "OK",
-      note: "Config method: OMCI + IPv4. WAN remote access, DHCP/Static IP, TR-069, and dual stack are not supported yet.", fields: [
+      note: "Changing only the VLAN while keeping Routing preserves current PPPoE credentials and GEM port. Switching to Routing from Bridging requires PPPoE credentials. OMCI + IPv4 only; WAN remote access, DHCP/Static IP, TR-069, and dual stack are not supported yet.", fields: [
       {k: "wan_vlan", label: "WAN VLAN-ID", type: "select", value: o.vlan, options: opts.length ? opts : [["", "(no VLANs available)"]]},
       {k: "mode", label: "ONU mode", type: "select", value: o.mode || "routing", options: [["routing", "Routing"], ["bridge", "Bridging"]]},
-      {k: "wan_mode", label: "WAN mode", type: "select", value: "pppoe", when: routing, options: [["pppoe", "PPPoE"], ["dhcp", "DHCP (not supported)", true], ["static", "Static IP (not supported)", true]]},
-      {k: "method", label: "Config method", type: "select", value: "omci", when: routing, options: [["omci", "OMCI"], ["tr069", "TR-069 (not supported)", true]]},
-      {k: "ip_protocol", label: "IP Protocol", type: "select", value: "ipv4", when: routing, options: [["ipv4", "IPv4"], ["dual", "Dual stack IPv4/IPv6 (not supported)", true]]},
-      {k: "username", label: "Username", value: o.pppoe_user || "", when: routing},
-      {k: "password", label: "Password", type: "password", when: routing, note: "Sent to the OLT; not stored in the dashboard."}]});
+      {k: "wan_mode", label: "WAN mode", type: "select", value: "pppoe", when: routingSetup, options: [["pppoe", "PPPoE"], ["dhcp", "DHCP (not supported)", true], ["static", "Static IP (not supported)", true]]},
+      {k: "method", label: "Config method", type: "select", value: "omci", when: routingSetup, options: [["omci", "OMCI"], ["tr069", "TR-069 (not supported)", true]]},
+      {k: "ip_protocol", label: "IP Protocol", type: "select", value: "ipv4", when: routingSetup, options: [["ipv4", "IPv4"], ["dual", "Dual stack IPv4/IPv6 (not supported)", true]]},
+      {k: "username", label: "Username", value: o.pppoe_user || "", when: routingSetup},
+      {k: "password", label: "Password", type: "password", when: routingSetup, note: "Sent to the OLT; not stored in the dashboard."}]});
     if (v) {
       $("#plan-dialog").close();
       await executeAction({action: "onu_mode", onu_id: id, params: {...v, wan_vlan: +v.wan_vlan},
@@ -159,10 +267,19 @@ async function header() {
   $("#e-save").onclick = async () => {
     const n = v => v ? +v : null;
     const name = $("#e-name").value.trim();
-    const save = async () => api(`/api/onus/${id}`, {method: "PUT", body: {name, address: $("#e-addr").value, contact: $("#e-contact").value,
+    const data = {name, address: $("#e-addr").value, contact: $("#e-contact").value,
       external_id: $("#e-ext").value, zone_id: n($("#e-zone").value), odb_id: n($("#e-odb").value),
-      dl_profile_id: n($("#e-dl").value), ul_profile_id: n($("#e-ul").value)}});
+      dl_profile_id: n($("#e-dl").value), ul_profile_id: n($("#e-ul").value)};
+    const save = async () => api(`/api/onus/${id}`, {method: "PUT", body: data});
     if (name.trim() !== (o.name || "").trim()) {
+      if (o.olt.cli_family === "c6xx") {
+        try {
+          await save();
+          toast("Saved in dashboard database");
+          await header();
+        } catch (e) { toast(e.message, true); }
+        return;
+      }
       executeAction({action: "rename_onu", onu_id: id, params: {name}, title: "Rename ONU", button: $("#e-save"), onDone: async () => {
         try {
           await save();
@@ -174,10 +291,11 @@ async function header() {
     }
     try {
       await save();
-      toast("Saved"); $("#onu-title").textContent = $("#e-name").value || o.sn;
+      toast("Saved");
     } catch (e) { toast(e.message, true);     }
   };
   refreshHeaderStatus().catch(e => toast(`Live status refresh failed: ${e.message}`, true));
+  loadHeaderWanIp();
 }
 function loading(el, msg = "Retrieving data from OLT…") { el.innerHTML = `<p class="muted">${msg}</p>`; }
 function failed(el, e, retry) { el.innerHTML = `<p class="err">${esc(e.message)}</p><button class="sm" id="retry">Retry</button>`; $("#retry", el).onclick = retry; }
@@ -188,6 +306,30 @@ async function tabStatus() {
   try {
     const r = await api(`/api/onus/${id}/status?summary=true`), o = r.optical;
     updateHeaderStatus(r.status, r.phase_state, o);
+    if (currentOnu?.olt.vendor === "cdata") {
+      const fields = Object.entries(r.fields || {}).map(([key, value]) =>
+        `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join("");
+      el.innerHTML = `<div class="row between"><b>${esc(r.interface)}</b><button class="sm" id="r1">Refresh</button></div>
+        <div class="big"><div class="tile"><b>${badge(r.status)}</b><span>Online Status</span></div>
+        <div class="tile"><b>${dbm(opticalValue(r.status, o.onu_rx))}</b><span>ONU Rx Power</span></div></div>
+        ${fields ? `<h4 class="slot">ONU detail from C-Data</h4><dl class="kv">${fields}</dl>` : ""}
+        ${r.error ? `<p class="err small">ONU details unavailable: ${esc(r.error)}</p>` : ""}
+        <p class="muted small">Only ONU identity, link status, and Rx power are currently verified for this model. Configuration changes and other optical metrics are unavailable.</p>`;
+      $("#r1").onclick = tabStatus;
+      return;
+    }
+    if (currentOnu?.olt.vendor === "hioso") {
+      const fields = Object.entries(r.fields || {}).map(([key, value]) =>
+        `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join("");
+      el.innerHTML = `<div class="row between"><b>${esc(r.interface)}</b><button class="sm" id="r1">Refresh</button></div>
+        <div class="big"><div class="tile"><b>${badge(r.status)}</b><span>Online Status</span></div>
+        <div class="tile"><b>${dbm(opticalValue(r.status, o.onu_rx))}</b><span>ONU Rx Power</span></div></div>
+        ${fields ? `<h4 class="slot">ONU detail from HIOSO</h4><dl class="kv">${fields}</dl>` : ""}
+        ${r.error ? `<p class="err small">Additional ONU details unavailable: ${esc(r.error)}</p>` : ""}
+        <p class="muted small">This firmware's verified detail command does not report offline reason, ONU temperature/voltage/bias, or ONU Tx power. Configuration changes other than the separately confirmed rename/reboot are unavailable.</p>`;
+      $("#r1").onclick = tabStatus;
+      return;
+    }
     const kv = Object.entries(r.fields).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
     el.innerHTML = `<div class="row between"><b>${esc(r.interface)}</b><button class="sm" id="r1">Refresh</button></div>
     <div class="big">
@@ -226,6 +368,103 @@ async function loadStatusMac(request) {
       section.innerHTML = `<h4 class="slot">MAC address</h4><p class="err">${esc(e.message)}</p>`;
     }
   }
+}
+
+async function loadHeaderWanIp() {
+  const display = $("#onu-wan-ip");
+  if (!display) return;
+  if (window.onuWanIpTimer) clearInterval(window.onuWanIpTimer);
+  try {
+    await refreshHeaderWanIpsFromOlt();
+    window.onuWanIpTimer = setInterval(refreshHeaderWanIpsFromOlt, 60000);
+  } catch (e) {
+    if (!$("#onu-wan-ip")) return;
+    if (!display.querySelector("a")) {
+      display.className = "err small";
+      display.textContent = `WAN IP lookup failed: ${e.message}`;
+    }
+  }
+}
+
+async function refreshHeaderWanIpsFromOlt() {
+  if (headerWanRefreshInProgress) return;
+  headerWanRefreshInProgress = true;
+  const display = $("#onu-wan-ip");
+  if (display) {
+    display.className = "muted small";
+    display.textContent = "Checking active PPPoE…";
+  }
+  try {
+    if (["hioso", "cdata"].includes(currentOnu?.olt.vendor)) {
+      const result = await api(`/api/mikrotik/onus/${id}/wan-ips?refresh=true`);
+      if ($("#onu-wan-ip")) renderHeaderWanIps(result);
+      return;
+    }
+    const mac = await api(`/api/onus/${id}/mac`);
+    if (!display) return;
+    if (!mac.ok) {
+      display.className = "err small";
+      display.textContent = `Could not read ONU MAC table from OLT: ${mac.raw || "command rejected"}`;
+      return;
+    }
+    const macs = [...new Set(mac.rows.map(row => row.mac))];
+    if (macs.length) {
+      await refreshHeaderWanIps(macs);
+      return;
+    }
+    const empty = await api(`/api/mikrotik/onus/${id}/wan-ips?refresh=true`);
+    renderHeaderWanIps(empty);
+  } catch (e) {
+    if (display) {
+      display.className = "err small";
+      display.textContent = `WAN IP refresh failed: ${e.message}`;
+    }
+  } finally {
+    headerWanRefreshInProgress = false;
+  }
+}
+
+async function refreshHeaderWanIps(macs) {
+  const display = $("#onu-wan-ip");
+  if (!display || !macs.length) return;
+  try {
+    const query = new URLSearchParams();
+    macs.forEach(mac => query.append("mac", mac));
+    const result = await api(`/api/mikrotik/onus/${id}/wan-ips?${query}`);
+    if ($("#onu-wan-ip")) renderHeaderWanIps(result);
+  } catch (e) {
+    if ($("#onu-wan-ip")) {
+      display.className = "err small";
+      display.textContent = `WAN IP refresh failed: ${e.message}`;
+    }
+  }
+}
+
+function renderHeaderWanIps(result) {
+  const display = $("#onu-wan-ip");
+  if (!display) return;
+  const username = $("#onu-pppoe-user");
+  if (result.ambiguous) {
+    if (username && !username.dataset.configured) username.textContent = "Ambiguous";
+    display.className = "err small";
+    const details = result.errors.length ? ` Router errors: ${result.errors.join("; ")}` : "";
+    display.textContent = `${result.message}${details}`;
+    return;
+  }
+  const sessionUsers = [...new Set(result.matches.map(match => match.username?.trim()).filter(Boolean))];
+  if (username && !username.dataset.configured) {
+    username.textContent = sessionUsers.length ? sessionUsers.join(", ") : "—";
+  }
+  if (result.matches.length) {
+    display.className = "";
+    display.innerHTML = result.matches.map(match =>
+      `<a href="${esc(match.url)}" title="${esc(match.router)} · ${esc(match.username)}">${esc(match.ip)}</a>`).join("<br>") +
+      (result.errors.length ? '<br><small class="err">Some router data could not be refreshed.</small>' : "");
+    return;
+  }
+  display.className = result.errors.length ? "err small" : "muted small";
+  const details = result.errors.length ? ` Router errors: ${result.errors.join("; ")}` : "";
+  display.textContent = `${result.message}${details}`;
 }
 
 onEvent(m => {
@@ -341,15 +580,86 @@ $("#tabs").onclick = async e => {
   if (timer) { clearInterval(timer); timer = null; }
   const act = b.dataset.act;
   if (act === "resync") {
-    b.disabled = true;
-    try { const r = await api(`/api/onus/${id}/resync`, {method: "POST"}); toast(`ONU config re-read from OLT (VLAN ${r.vlan ?? "—"})`); header(); } catch (err) { toast(err.message, true); }
-    b.disabled = false; return;
+    openPlan({action: "repush_onu", onu_id: id, onDone: () => {
+      void (async () => {
+        try {
+          const r = await api(`/api/onus/${id}/resync`, {method: "POST"});
+          toast(`ONU repush succeeded; dashboard synced from OLT (VLAN ${r.vlan ?? "—"})`);
+          await header();
+        } catch (err) {
+          toast(`ONU repush succeeded, but dashboard sync failed: ${err.message}`, true);
+        }
+      })();
+    }});
+    return;
   }
   if (act === "reboot") {
+    if (window.USER_ROLE === "olt_limited") {
+      if (!confirm(`Reboot ONT ${currentOnu?.interface} on ${currentOnu?.olt.name}? The subscriber connection will be interrupted temporarily.`)) return;
+      b.disabled = true;
+      try {
+        const result = await api(`/api/onus/${id}/reboot`, {method: "POST", body: {confirm: true}});
+        toast(result.message);
+        setTimeout(() => refreshHeaderStatus().catch(e => toast(`Status refresh failed: ${e.message}`, true)), 8000);
+      } catch (e) { toast(e.message, true); }
+      finally { b.disabled = false; }
+      return;
+    }
+    if (currentOnu?.olt.vendor === "hioso") {
+      if (!confirm(`Reboot ONT ${currentOnu.interface} on ${currentOnu.olt.name}? The subscriber connection will be interrupted temporarily.`)) return;
+      b.disabled = true;
+      try {
+        const result = await api(`/api/onus/${id}/hioso/reboot`, {method: "POST", body: {confirm: true}});
+        toast(result.message);
+        setTimeout(() => refreshHeaderStatus().catch(e => toast(`Status refresh failed: ${e.message}`, true)), 8000);
+      } catch (e) { toast(e.message, true); }
+      finally { b.disabled = false; }
+      return;
+    }
     executeAction({action: "reboot_onu", onu_id: id, title: "Reboot ONU", button: b, onDone: () => header()});
     return;
   }
-  openPlan({action: act + "_onu", onu_id: id, onDone: () => act === "delete" ? setTimeout(() => location.href = "/configured", 1200) : header()});
+  if (act === "admin-toggle") {
+    const values = await askForm({title: "Change ONU state", submit: "Continue", fields: [
+      {k: "action", label: "Action", type: "select", value: "disable_onu",
+        options: [["disable_onu", "Disable ONU"], ["enable_onu", "Enable ONU"]]}]});
+    if (!values) return;
+    const disabling = values.action === "disable_onu";
+    const operation = disabling ? "Disable" : "Enable";
+    if (!confirm(`${operation} all Ethernet ports on ONU ${currentOnu?.interface || id}?`)) return;
+    executeAction({action: values.action, onu_id: id, title: `${operation} ONU`,
+      button: b, onDone: () => header()});
+    return;
+  }
+  if (act === "delete") {
+    const target = currentOnu;
+    if (!target) return toast("ONU details are not loaded yet. Please try again.", true);
+    if (!confirm(`Are you sure you want to delete ONU ${target.sn} from ${target.olt.name} ${target.slot}/${target.pon}:${target.onu_number}? The ONU configuration will be removed from the OLT and the subscriber will be disconnected.`)) return;
+    const originalLabel = b.textContent;
+    b.disabled = true;
+    b.textContent = "Deleting…";
+    try {
+      const job = await api(`/api/onus/${id}/delete`, {method: "POST", body: {confirm: true}});
+      toast("ONU deletion started in the background.");
+      let result = job;
+      while (result.status === "queued" || result.status === "running") {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        result = await api(`/api/onu-deletions/${job.id}`);
+      }
+      if (result.status !== "completed") throw new Error(result.message || "ONU deletion failed.");
+      toast(`ONU ${target.sn} deleted.`);
+      location.href = "/configured";
+    } catch (error) {
+      toast(error.message, true);
+      b.disabled = false;
+      b.textContent = originalLabel;
+    }
+    return;
+  }
+  openPlan({action: act + "_onu", onu_id: id, onDone: () => header()});
 };
-addEventListener("beforeunload", () => clearInterval(timer));
+addEventListener("beforeunload", () => {
+  clearInterval(timer);
+  clearInterval(window.onuWanIpTimer);
+});
 header().catch(e => toast(e.message, true));

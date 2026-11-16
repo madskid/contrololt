@@ -17,11 +17,15 @@ class OLT(Base):
     __tablename__ = "olts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    vendor: Mapped[str] = mapped_column(String(20), default="zte")           # zte | hioso
     name: Mapped[str] = mapped_column(String(100))
     ip: Mapped[str] = mapped_column(String(64), unique=True)
     model: Mapped[str] = mapped_column(String(50), default="C320")        # C300 / C320 / ... / custom text
     cli_family: Mapped[str] = mapped_column(String(10), default="legacy")  # legacy | c6xx (CLI interface naming style)
     shelf: Mapped[int] = mapped_column(Integer, default=1)
+    mikrotik_router_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("mikro_routers.id", ondelete="SET NULL"), nullable=True
+    )
 
     telnet_port: Mapped[int] = mapped_column(Integer, default=23)
     telnet_user: Mapped[str] = mapped_column(String(100), default="")
@@ -40,7 +44,7 @@ class OLT(Base):
     rx_crit: Mapped[float] = mapped_column(Float, default=-32.0)
     temp_warn: Mapped[float] = mapped_column(Float, default=45.0)          # OLT temperature warning threshold (°C)
     temp_crit: Mapped[float] = mapped_column(Float, default=55.0)
-    write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)   # Allow changes to the OLT from the dashboard
+    write_enabled: Mapped[bool] = mapped_column(Boolean, default=False)   # ZTE writes or explicitly enabled HIOSO rename/reboot
 
     sync_requested: Mapped[bool] = mapped_column(Boolean, default=True)
     last_poll_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -79,6 +83,7 @@ class ONU(Base):
 
     status: Mapped[str] = mapped_column(String(16), default="unknown")     # online|offline|los|power_fail|unknown
     phase_state: Mapped[str] = mapped_column(String(24), default="")       # Raw value from the OLT
+    hidden_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
     rx_power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)       # dBm at the ONU
     olt_rx_power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)   # dBm at the OLT
     status_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
@@ -96,6 +101,7 @@ class ONU(Base):
     ul_profile_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     distance_m: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     cfg_name: Mapped[str] = mapped_column(String(100), default="")         # Name as written in the OLT configuration
+    name_locked: Mapped[bool] = mapped_column(Boolean, default=False)       # Dashboard name is authoritative when the OLT masks it.
     mgmt_ip: Mapped[str] = mapped_column(String(45), default="")
     mgmt_vlan: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
@@ -113,6 +119,22 @@ class OnuMacAddress(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class OnuWanIp(Base):
+    __tablename__ = "onu_wan_ips"
+    __table_args__ = (
+        UniqueConstraint("onu_id", "mac_compact", "router", "username", name="uq_onu_wan_ip_session"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    onu_id: Mapped[int] = mapped_column(ForeignKey("onus.id", ondelete="CASCADE"), index=True)
+    mac: Mapped[str] = mapped_column(String(17))
+    mac_compact: Mapped[str] = mapped_column(String(12))
+    router: Mapped[str] = mapped_column(String(100), default="")
+    username: Mapped[str] = mapped_column(String(100), default="")
+    ip: Mapped[str] = mapped_column(String(45))
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class Zone(Base):
     __tablename__ = "zones"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -125,6 +147,8 @@ class Odb(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True)
     zone_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    latitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    longitude: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
 class SpeedProfile(Base):
@@ -216,6 +240,38 @@ class OnuMoveJob(Base):
     result: Mapped[str] = mapped_column(Text, default="")
 
 
+class ReplaceSnJob(Base):
+    """Track a background ONU serial replacement."""
+    __tablename__ = "replace_sn_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    onu_id: Mapped[int] = mapped_column(Integer, index=True)
+    requested_by: Mapped[str] = mapped_column(String(60), default="")
+    old_sn: Mapped[str] = mapped_column(String(32), default="")
+    new_sn: Mapped[str] = mapped_column(String(32), default="")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    saved: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    save_message: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class DeleteOnuJob(Base):
+    """Track a background ONU deletion."""
+    __tablename__ = "delete_onu_jobs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    onu_id: Mapped[int] = mapped_column(Integer, index=True)
+    requested_by: Mapped[str] = mapped_column(String(60), default="")
+    status: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -224,3 +280,70 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(256))
     role: Mapped[str] = mapped_column(String(20), default="read_only", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class UserOltAccess(Base):
+    __tablename__ = "user_olt_access"
+
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    olt_id: Mapped[int] = mapped_column(ForeignKey("olts.id", ondelete="CASCADE"), primary_key=True)
+
+
+# ─────────────────────── MikroTik Router ───────────────────────
+
+class MikroRouter(Base):
+    """MikroTik router managed via the native RouterOS API."""
+    __tablename__ = "mikro_routers"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    ip: Mapped[str] = mapped_column(String(64), unique=True)
+    api_port: Mapped[int] = mapped_column(Integer, default=8728)       # Native RouterOS API port (8728 plain, 8729 TLS)
+    api_user: Mapped[str] = mapped_column(String(100), default="admin")
+    api_pass_enc: Mapped[str] = mapped_column(Text, default="")
+    use_ssl: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    status: Mapped[str] = mapped_column(String(20), default="pending")  # pending|online|offline
+    identity: Mapped[str] = mapped_column(String(120), default="")      # RouterOS system identity
+    ros_version: Mapped[str] = mapped_column(String(40), default="")    # RouterOS version
+    board: Mapped[str] = mapped_column(String(100), default="")         # Board name / model
+    uptime: Mapped[str] = mapped_column(String(40), default="")
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    profiles: Mapped[list["MikroProfile"]] = relationship(
+        back_populates="router", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+
+class MikroProfile(Base):
+    """PPPoE profile cached from a MikroTik router (for quick lookups / dropdowns)."""
+    __tablename__ = "mikro_profiles"
+    __table_args__ = (UniqueConstraint("router_id", "name", name="uq_mikro_profile"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    router_id: Mapped[int] = mapped_column(ForeignKey("mikro_routers.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    rate_limit: Mapped[str] = mapped_column(String(80), default="")    # e.g. "10M/10M"
+    local_address: Mapped[str] = mapped_column(String(64), default="")
+    remote_address: Mapped[str] = mapped_column(String(120), default="")
+
+    router: Mapped[MikroRouter] = relationship(back_populates="profiles")
+
+
+class MikroPppoeLastCaller(Base):
+    """Remember the most recently observed caller ID for each PPPoE user."""
+    __tablename__ = "mikro_pppoe_last_callers"
+    __table_args__ = (UniqueConstraint("router_id", "username", name="uq_mikro_pppoe_last_caller"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    router_id: Mapped[int] = mapped_column(ForeignKey("mikro_routers.id", ondelete="CASCADE"), index=True)
+    username: Mapped[str] = mapped_column(String(120))
+    mac: Mapped[str] = mapped_column(String(64), default="")
+    onu_id: Mapped[Optional[int]] = mapped_column(ForeignKey("onus.id", ondelete="SET NULL"), nullable=True)
+    onu_sn: Mapped[str] = mapped_column(String(32), default="")
+    onu_name: Mapped[str] = mapped_column(String(100), default="")
+    onu_slot: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    onu_pon: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    onu_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

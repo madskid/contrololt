@@ -74,7 +74,8 @@ async def autosave_loop() -> None:
         try:
             now_local = datetime.now(sync._tz())
             async with SessionLocal() as s:
-                rows = (await s.execute(select(OLT.id, OLT.last_save_at, OLT.last_save_attempt_at))).all()
+                rows = (await s.execute(select(OLT.id, OLT.last_save_at, OLT.last_save_attempt_at)
+                                        .where(OLT.vendor == "zte"))).all()
             due = [r.id for r in rows if sync.save_due(r.last_save_at, r.last_save_attempt_at, now_local)]
             if due:
                 log.info("Auto-saving configuration for %d OLTs", len(due))

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import SessionLocal, get_session
-from app.models import User
+from app.models import User, UserOltAccess
 
 _fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode()).digest()))
 
@@ -33,7 +33,13 @@ def dec(value: str) -> str:
 
 
 PASSWORD_ITERATIONS = 600_000
-ROLES = {"administrator", "read_only"}
+ROLES = {"administrator", "read_only", "olt_limited"}
+
+
+async def user_olt_ids(session: AsyncSession, user_id: int) -> set[int]:
+    return set(await session.scalars(
+        select(UserOltAccess.olt_id).where(UserOltAccess.user_id == user_id)
+    ))
 
 
 def hash_password(password: str) -> str:

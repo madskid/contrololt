@@ -9,8 +9,8 @@ async function openPlan({action, olt_id, onu_id, params = {}, onDone}) {
     <div class="muted small">OLT <b>${esc(plan.olt.name)}</b> · target <code>${esc(plan.target)}</code></div>
     ${plan.dangerous ? '<p class="err"><b>Risky action.</b> Review the commands carefully.</p>' : ""}
     ${plan.warnings.map(w => `<p class="small" style="color:var(--warn)">⚠ ${esc(w)}</p>`).join("")}
-    <label>Commands to send (editable; the server only accepts allowed commands)
-      <textarea id="pl-cmds" rows="${Math.min(18, plan.commands.length + 1)}" spellcheck="false" style="font:12px ui-monospace,monospace">${esc(plan.commands.join("\n"))}</textarea></label>
+    <label>${plan.meta.routing_vlan_only ? "Commands generated from the live ONU configuration" : "Commands to send (editable; the server only accepts allowed commands)"}
+      <textarea id="pl-cmds" rows="${Math.min(18, plan.commands.length + 1)}" spellcheck="false" ${plan.meta.routing_vlan_only ? "readonly" : ""} style="font:12px ui-monospace,monospace">${esc(plan.commands.join("\n"))}</textarea></label>
     ${plan.rollback.length ? `<details><summary>Automatic rollback if the OLT rejects a command</summary><pre class="out">${esc(plan.rollback.join("\n"))}</pre></details>` : ""}
     ${can ? "" : '<p class="err">This OLT is not enabled for changes. Enable "Allow changes to OLT" in Settings → OLTs → Edit.</p>'}
     <label style="flex-direction:row;gap:.5rem;align-items:center;font-size:13px;color:var(--fg)"><input type="checkbox" id="pl-save"> Save the OLT config after success (the <code>write</code> command)</label>
@@ -25,7 +25,8 @@ async function openPlan({action, olt_id, onu_id, params = {}, onDone}) {
     const lines = $("#pl-cmds").value.split("\n").map(x => x.trim()).filter(Boolean);
     const edited = JSON.stringify(lines) !== JSON.stringify(plan.commands);
     try {
-      const r = await api("/api/exec", {method: "POST", body: {action, olt_id, onu_id, params, confirm: true, save_after: $("#pl-save").checked, ...(edited ? {commands: lines} : {})}});
+      const r = await api("/api/exec", {method: "POST", body: {action, olt_id, onu_id, params, confirm: true, save_after: $("#pl-save").checked,
+        ...(edited || plan.meta.routing_vlan_only ? {commands: lines} : {})}});
       $("#pl-result").innerHTML = `<p class="${r.ok ? "" : "err"}"><b>${r.ok ? "Success" : "Failed"}:</b> ${esc(r.message)}${r.rolled_back ? " — rollback executed" : ""}
         ${r.saved ? ` · config save: ${r.saved.ok ? "OK" : "failed (" + esc(r.saved.message) + ")"}` : ""}</p>
         <pre class="out">${esc(r.log.map(x => `${x.rollback ? "[rollback] " : ""}${x.error ? "✗" : "✓"} ${x.cmd}${x.fallback_to ? "\n    rejected; trying alternative: " + x.fallback_to : ""}${x.output ? "\n    " + x.output.replace(/\n/g, "\n    ") : ""}`).join("\n"))}</pre>`;

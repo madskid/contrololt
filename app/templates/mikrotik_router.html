@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row between wrap mtk-page-head">
+  <div>
+    <div class="row" style="gap:.5rem">
+      <a href="/settings/mikrotik" class="muted">← Routers</a>
+      <h2 style="margin:0" id="router-name">MikroTik Router</h2>
+      <span id="router-status-badge"></span>
+    </div>
+    <div class="muted small" id="router-sub">Memuat informasi router…</div>
+  </div>
+  <div class="row">
+    <button id="btn-recheck" class="sm">Check Status</button>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div id="tabs" class="tabs" style="margin-top:1rem">
+  <button class="active" data-tab="tab-secrets">PPPoE Users (Secrets)</button>
+  <button data-tab="tab-active">Active Sessions</button>
+  <button data-tab="tab-profiles">Profiles</button>
+  <button data-tab="tab-mac-lookup">Cek MAC &amp; ONU OLT</button>
+</div>
+
+<!-- Tab 1: PPPoE Users (Secrets) -->
+<div id="tab-secrets" class="tab card pad stack">
+  <div class="row between wrap">
+    <div class="row wrap gap grow">
+      <input id="f-secret-q" placeholder="Cari username, profile, comment…" class="grow" style="max-width:320px">
+      <button id="btn-refresh-secrets" class="sm">Refresh</button>
+    </div>
+    {% if user_role != "read_only" %}
+    <button class="primary" id="btn-add-secret">+ Add PPPoE User</button>
+    {% endif %}
+  </div>
+
+  <div class="scroll">
+    <table id="secret-table">
+      <thead>
+        <tr>
+          <th>Name (Username)</th>
+          <th>Profile</th>
+          <th>Comment</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="secret-empty" class="muted pad" hidden>Tidak ada PPPoE user ditemukan.</p>
+  </div>
+</div>
+
+<!-- Tab 2: PPPoE Active Sessions -->
+<div id="tab-active" class="tab card pad stack" hidden>
+  <div class="row between wrap">
+    <div class="row wrap gap grow">
+      <input id="f-active-q" placeholder="Cari user aktif, IP, caller-id/MAC…" class="grow" style="max-width:320px">
+      <button id="btn-refresh-active" class="sm">Refresh</button>
+    </div>
+  </div>
+
+  <div class="scroll">
+    <table id="active-table">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>IP Address</th>
+          <th>Caller ID (MAC)</th>
+          <th>Uptime</th>
+          <th>Service</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="active-empty" class="muted pad" hidden>Tidak ada sesi PPPoE yang aktif saat ini.</p>
+  </div>
+</div>
+
+<!-- Tab 3: PPPoE Profiles -->
+<div id="tab-profiles" class="tab card pad stack" hidden>
+  <div class="row between">
+    <div>
+      <h3 style="margin:0">PPPoE Profiles</h3>
+      <div class="muted small">Daftar profile yang dikonfigurasi di MikroTik Router.</div>
+    </div>
+    <button id="btn-refresh-profiles" class="sm">Sync dari Router</button>
+  </div>
+
+  <div class="scroll">
+    <table id="profile-table">
+      <thead>
+        <tr>
+          <th>Profile Name</th>
+          <th>Rate Limit (Rx/Tx)</th>
+          <th>Local Address</th>
+          <th>Remote Address</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="profile-empty" class="muted pad" hidden>Tidak ada profile ditemukan.</p>
+  </div>
+</div>
+
+<!-- Tab 4: Cek MAC & ONU OLT (Pencarian Otomatis) -->
+<div id="tab-mac-lookup" class="tab card pad stack" hidden>
+  <div>
+    <h3 style="margin:0">Cek MAC Address &amp; ONU OLT Otomatis</h3>
+    <div class="muted small">Masukkan username dial PPPoE. Sistem akan mengambil MAC Address aktif di MikroTik, mencocokkannya ke tabel MAC OLT, dan langsung menampilkan ONU serta Serial Number (SN) modem.</div>
+  </div>
+
+  <form id="mac-lookup-form" class="row wrap gap" style="align-items:flex-end">
+    <label style="flex:1;min-width:240px">PPPoE Username
+      <input id="lookup-user" required placeholder="e.g. user_fiber_01">
+    </label>
+    <button class="primary" type="submit">Cek Sekarang</button>
+  </form>
+
+  <div id="lookup-result" class="card pad stack" style="margin-top:.8rem" hidden>
+    <h4>Hasil Pemeriksaan:</h4>
+    <div class="kv">
+      <dt>PPPoE Username</dt><dd id="res-user">—</dd>
+      <dt>Caller ID (MAC)</dt><dd id="res-mac">—</dd>
+      <dt>Status Pencocokan OLT</dt><dd id="res-msg">—</dd>
+      <dt>Serial Number (SN) ONU</dt><dd id="res-sn">—</dd>
+      <dt>Nama Pelanggan / ONU</dt><dd id="res-onu-name">—</dd>
+      <dt>Tipe ONU</dt><dd id="res-onu-type">—</dd>
+      <dt>Posisi Port (PON)</dt><dd id="res-pos">—</dd>
+      <dt>Status Koneksi ONU</dt><dd id="res-status">—</dd>
+    </div>
+    <div id="res-link-wrap" style="margin-top:.6rem" hidden>
+      <a id="res-onu-link" class="btn" href="#">Buka Detail ONU di OLT</a>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Dialog: Add Secret -->
+<dialog id="secret-dialog">
+  <form id="secret-form" method="dialog" class="stack">
+    <h3 id="dlg-secret-title">Add PPPoE User</h3>
+    <div class="grid2">
+      <label>Username
+        <input name="name" required maxlength="120">
+      </label>
+      <label>Password
+        <input name="password" required maxlength="256" autocomplete="new-password">
+      </label>
+      <label>Profile
+        <select name="profile" required></select>
+      </label>
+      <label>Comment
+        <input name="comment" maxlength="500" placeholder="Keterangan pelanggan...">
+      </label>
+    </div>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Cancel</button>
+      <button class="primary" id="btn-save-secret" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Modal Dialog: Edit Secret -->
+<dialog id="secret-edit-dialog">
+  <form id="secret-edit-form" method="dialog" class="stack">
+    <h3>Edit PPPoE User: <span id="edit-username"></span></h3>
+    <div class="grid2">
+      <label>Password Baru (kosongkan jika tidak diganti)
+        <input name="password" maxlength="256" placeholder="Password baru" autocomplete="new-password">
+      </label>
+      <label>Profile
+        <select name="profile" required></select>
+      </label>
+      <label class="wide">Comment
+        <input name="comment" maxlength="500">
+      </label>
+      <label class="wide" style="flex-direction:row;gap:.5rem;align-items:center;font-size:13px;color:var(--fg)">
+        <input name="disabled" type="checkbox"> Disable User
+      </label>
+    </div>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Cancel</button>
+      <button class="primary" id="btn-save-edit-secret" value="ok">Update</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Modal Dialog: Copy Secret -->
+<dialog id="secret-copy-dialog">
+  <form id="secret-copy-form" method="dialog" class="stack">
+    <h3>Copy PPPoE User</h3>
+    <div class="muted small" style="margin-bottom:.6rem">
+      Menyalin konfigurasi dari user: <b id="copy-orig-name"></b>
+    </div>
+    <div class="grid2">
+      <label>Username Baru
+        <input name="new_name" required maxlength="120">
+      </label>
+      <label>Password Baru
+        <input name="new_password" required maxlength="256" autocomplete="new-password">
+      </label>
+    </div>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Cancel</button>
+      <button class="primary" id="btn-save-copy-secret" value="ok">Copy User</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Modal Dialog: Ganti Profile Cepat -->
+<dialog id="change-profile-dialog">
+  <form id="change-profile-form" method="dialog" class="stack">
+    <h3>Ganti Profile PPPoE</h3>
+    <div class="muted small">User: <b id="cp-username"></b></div>
+    <label>Pilih Profile Baru
+      <select name="profile" required id="cp-select"></select>
+    </label>
+    <div class="row end">
+      <button type="button" class="btn-dlg-cancel">Cancel</button>
+      <button class="primary" id="btn-save-change-profile" value="ok">Ganti Profile</button>
+    </div>
+  </form>
+</dialog>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.ROUTER_ID = {{ router_id }};
+</script>
+<script src="/static/mikrotik_router.js"></script>
+{% endblock %}

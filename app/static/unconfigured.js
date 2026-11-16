@@ -21,7 +21,7 @@ function renderItems(scanned) {
   $("#tbl tbody").innerHTML = ITEMS.map((o, i) => {
     const sources = Array.isArray(o.registered_sources) ? o.registered_sources : [];
     const action = matchError ? "check" : sources.length ? "move" : "register";
-    const label = sources.length && !matchError ? "Move ONU" : "Authorize";
+    const label = sources.length && !matchError ? "Move / delete first" : "Authorize";
     return `<tr><td>${esc(o.olt_name)}</td><td>${o.slot}</td><td>${o.pon}</td><td>${esc(o.location)}</td>
       <td><b>${esc(o.sn)}</b></td><td>${esc(o.state || o.model || "")}</td><td><button class="sm primary" data-i="${i}" data-act="${action}">${label}</button></td></tr>`;
   }).join("") || `<tr><td colspan="7" class="muted">No ONUs awaiting registration (${scanned} OLTs scanned).</td></tr>`;
@@ -51,32 +51,73 @@ function openMove(it) {
   const sources = it.registered_sources;
   const form = $("#move-form");
   const sourceOptions = sources.map((source, index) =>
-    `<option value="${index}">${esc(source.sn)} · ${esc(source.name || "ONU")} · ${esc(source.olt)} ${source.slot}/${source.pon}:${source.onu_number}</option>`
+    `<option value="${index}">${esc(source.sn)} · ${esc(source.name || "ONU")} · ${esc(source.olt)} ${source.slot}/${source.pon}:${source.onu_number} · ${source.olt_id === it.olt_id ? "same OLT" : "different OLT"}</option>`
   ).join("");
   form.innerHTML = `<h3>Move registered ONU ${esc(it.sn)}</h3>
     <div class="reg-summary muted">Destination detected on <b>${esc(it.olt_name)}</b>, board ${it.slot}, PON ${it.pon}.</div>
     <label>Current registered ONU<select name="source_onu_id" required>${sourceOptions}</select></label>
-    <div class="reg-notice">On confirmation, the existing bridge configuration will be applied to the detected destination PON, then removed from the source. Both OLTs must allow changes. Routing PPPoE and unsupported custom settings cannot be moved automatically.</div>
-    <div class="row end"><button type="button" id="move-cancel">Cancel</button><button type="submit" class="primary">Move ONU now</button></div>`;
+    <div class="reg-notice" id="move-notice"></div>
+    <div class="row end"><button type="button" id="move-cancel">Cancel</button><button type="submit" class="primary">Move ONU within this OLT</button></div>`;
   const dlg = $("#move-dialog");
   $("#move-cancel").onclick = () => dlg.close();
+  const submit = form.querySelector('button[type="submit"]');
+  const updateMoveAction = () => {
+    const source = sources[Number(form.elements.source_onu_id.value)];
+    const sameOlt = source?.olt_id === it.olt_id;
+    submit.textContent = sameOlt ? "Move ONU within this OLT" : "Delete on old OLT first";
+    submit.disabled = !source?.write_enabled || (sameOlt && !it.write_enabled);
+    $("#move-notice").textContent = sameOlt
+      ? "The bridge configuration will move to the detected PON on this same OLT. Source ONU removal and destination registration are handled automatically. Routing PPPoE and unsupported custom settings cannot be moved."
+      : "Cross-OLT moves are not supported. Delete the registration on the old OLT first; then scan and authorize the detected ONU on the new OLT. This does not provision the destination automatically.";
+  };
+  form.elements.source_onu_id.onchange = updateMoveAction;
+  updateMoveAction();
   form.onsubmit = async event => {
     event.preventDefault();
     const source = sources[Number(form.elements.source_onu_id.value)];
     if (!source) return;
-    if (!confirm(`Move ${it.sn} from ${source.olt} ${source.slot}/${source.pon}:${source.onu_number} to ${it.olt_name} ${it.slot}/${it.pon} now?`)) return;
-    const submit = form.querySelector('button[type="submit"]');
+    const sameOlt = source.olt_id === it.olt_id;
+    const confirmation = sameOlt
+      ? `Move ${it.sn} from ${source.olt} ${source.slot}/${source.pon}:${source.onu_number} to ${it.olt_name} ${it.slot}/${it.pon} now?`
+      : `Delete ${it.sn} from the old OLT ${source.olt} ${source.slot}/${source.pon}:${source.onu_number}? You must authorize it separately on ${it.olt_name} afterward.`;
+    if (!confirm(confirmation)) return;
     submit.disabled = true;
+    let deleteQueued = false;
     try {
-      const job = await api("/api/onu-moves", {method: "POST", body: {
-        source_onu_id: source.id, target_olt_id: it.olt_id, target_slot: it.slot, target_pon: it.pon,
-      }});
-      toast(`${job.message} ${job.sn}: ${job.source} → ${job.target}`);
+      if (sameOlt) {
+        const job = await api("/api/onu-moves", {method: "POST", body: {
+          source_onu_id: source.id, target_olt_id: it.olt_id, target_slot: it.slot, target_pon: it.pon,
+        }});
+        toast(`${job.message} ${job.sn}: ${job.source} → ${job.target}`);
+        dlg.close();
+        await scan();
+        return;
+      }
+
+      submit.textContent = "Deleting on old OLT…";
+      $("#move-cancel").disabled = true;
+      const job = await api(`/api/onus/${source.id}/delete`, {method: "POST", body: {confirm: true}});
+      deleteQueued = true;
+      const started = Date.now();
+      let result;
+      do {
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        result = await api(`/api/onu-deletions/${job.id}`);
+        if (result.status === "failed") throw new Error(result.message || "ONU deletion failed.");
+        if (Date.now() - started > 180000) throw new Error("Deletion is still running. Check ONU status before retrying.");
+      } while (result.status !== "completed");
       dlg.close();
+      toast(`Old registration deleted. Scan and authorize ${it.sn} on ${it.olt_name}.`);
       await scan();
     } catch (error) {
       toast(error.message, true);
-      submit.disabled = false;
+      $("#move-cancel").disabled = false;
+      if (deleteQueued) {
+        submit.disabled = true;
+        submit.textContent = "Deletion processing — scan later";
+      } else {
+        updateMoveAction();
+      }
     }
   };
   dlg.showModal();

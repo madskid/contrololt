@@ -84,7 +84,7 @@ _ALLOWED = [re.compile(x) for x in [
     r"wan-ip ipv4 mode pppoe username \S+ password \S+ vlan-profile \S+ host \d+",
     r"vlan port eth_\d+/\d+ mode (?:hybrid def-vlan \d+|transparent|tag vlan \d+(?: pri(?:ority)? \d+)?|trunk vlan [\d,\-]+)",
     r"vlan port veip_\d+ mode hybrid",
-    r"no vlan port eth_\d+/\d+ mode", r"no service-port \d+",
+    r"no vlan port (?:eth_\d+/\d+|veip_\d+) mode", r"no service [\w.\-]{1,40}", r"no service-port \d+",
     r"flow mode \d+ tag-filter (?:vlan-filter|vid-filter) untag-filter (?:discard|transparent)",
     r"flow \d+ (?:pri|priority) \d+ (?:vlan|vid) \d+", r"gemport \d+ flow \d+", r"switchport-bind switch_\d+/\d+ iphost \d+",
     r"pppoe \d+ nat enable user \S+ password \S+",
@@ -97,7 +97,8 @@ _ALLOWED = [re.compile(x) for x in [
     r"reboot", r"restore factory", r"exit",
     r"vlan database", r"vlan \d[\d,\-]*", r"no vlan \d[\d,\-]*", r"name [^\x00-\x1f?]{1,64}",
     r"switchport vlan \d[\d,\-]* tag", r"no switchport vlan \d[\d,\-]* tag",
-    r"gpon", r"profile tcont \S+ type \d+ fixed \d+", r"profile traffic \S+ sir \d+ pir \d+",
+    r"(?:gpon|pon)", r"profile tcont \S+ type \d+ fixed \d+",
+    r"profile tcont \S+ type 4 maximum \d+", r"profile traffic \S+ sir \d+ pir \d+",
 ]]
 
 
@@ -165,6 +166,32 @@ def bridge_lines(svc: str, vlan: int, eth_ports: int, prof: zte.Profile | None =
         prof.reg_eth_bridge.format(i=i, vlan=vlan) for i in range(1, max(1, int(eth_ports or 1)) + 1)]
 
 
+def bridge_mode_cleanup(config: str) -> list[str]:
+    """Build removal commands for bridge services and VLAN ports in the ONU management section."""
+    cleanup, in_mng = [], False
+    for raw in config.splitlines():
+        line = raw.strip()
+        if not line or line in ("!", "end"):
+            in_mng = False
+            continue
+        if line.startswith("pon-onu-mng "):
+            in_mng = True
+            continue
+        if line.startswith(("interface ", "pon-onu-mng ")):
+            in_mng = False
+            continue
+        if not in_mng:
+            continue
+        service = re.fullmatch(r"service (\S+) gemport \d+(?: cos \d+)? vlan \d+", line)
+        if service:
+            cleanup.append(f"no service {ident(service.group(1), 'Service name')}")
+            continue
+        vlan_port = re.fullmatch(r"vlan port ((?:eth_\d+/\d+)|(?:veip_\d+)) mode .+", line)
+        if vlan_port:
+            cleanup.append(f"no vlan port {vlan_port.group(1)} mode")
+    return list(dict.fromkeys(cleanup))
+
+
 def routing_lines(vlan: int, user: str, pw: str, prof: zte.Profile | None = None,
                   svc: str = "ServiceName") -> list[str]:
     """Pola PPPoE (OMCI) persis seperti ONU routing di config OLT Anda."""
@@ -182,6 +209,82 @@ def routing_lines(vlan: int, user: str, pw: str, prof: zte.Profile | None = None
             f"onu-vlan iphost 1 up-mode add up-pri 0 up-vlan {vlan} down-mode transparent",
             f"vlan-filter-mode iphost 1 tag-filter {routing_filter} untag-filter transparent",
             f"vlan-filter iphost 1 {priority_keyword} 0 {vlan_keyword} {vlan}"]
+
+
+def plan_routing_vlan_update(olt, onu, vlan: int, interface_config: str, mng_config: str) -> Plan:
+    """Build a VLAN-only update from the ONU's live routing configuration."""
+    prof = _prof(olt)
+    n_if = _onu_if(olt, onu)
+    iface_lines = [line.strip() for line in interface_config.splitlines()]
+    mng_lines = [line.strip() for line in mng_config.splitlines()]
+
+    service_ports = [line for line in iface_lines if re.match(r"service-port 1\b", line, re.I)]
+    if len(service_ports) != 1 or not re.fullmatch(
+            r"service-port 1 vport 1 user-vlan \d+ vlan \d+", service_ports[0], re.I):
+        raise PlanError("Could not safely identify the ONU's current service-port VLAN; no changes were sent.")
+    if not any(re.fullmatch(r"gemport 1 (?:name \S+ )?tcont 1", line, re.I) for line in iface_lines):
+        raise PlanError("Could not verify GEM port 1 on the ONU interface; no changes were sent.")
+    if not any(re.fullmatch(r"pppoe 1 nat enable user \S+ password \S+", line, re.I) for line in mng_lines):
+        raise PlanError("Could not verify the existing PPPoE configuration; use the full ONU mode update instead.")
+    if not any(re.fullmatch(r"switchport-bind switch_0/1 iphost 1", line, re.I) for line in mng_lines):
+        raise PlanError("Could not verify the existing PPPoE switch binding; no changes were sent.")
+
+    flow_rules = [line for line in mng_lines if re.match(r"flow 1 (?:pri|priority) ", line, re.I)]
+    flow_parts = [re.fullmatch(r"flow 1 (pri|priority) (\d+) (vlan|vid) (\d+)", line, re.I)
+                 for line in flow_rules]
+    if len(flow_rules) != len(flow_parts) or len({(m.group(1).lower(), m.group(2), m.group(3).lower())
+                                                  for m in flow_parts}) > 1:
+        raise PlanError("The ONU has multiple or unsupported flow rules; inspect its OLT configuration manually.")
+    flow_priority = flow_parts[0].group(2) if flow_parts else "0"
+    flow_priority_keyword = flow_parts[0].group(1).lower() if flow_parts else prof.reg_routing_priority_keyword
+    flow_vlan_keyword = flow_parts[0].group(3).lower() if flow_parts else prof.reg_routing_vlan_keyword
+
+    flow_modes = [line for line in mng_lines if re.match(r"flow mode 1\b", line, re.I)]
+    if len(flow_modes) > 1:
+        raise PlanError("The ONU has multiple flow-mode rules; inspect its OLT configuration manually.")
+    flow_mode = flow_modes[0] if flow_modes else (
+        f"flow mode 1 tag-filter {prof.reg_routing_filter} untag-filter discard")
+
+    filter_modes = [line for line in mng_lines if re.match(r"vlan-filter-mode iphost 1\b", line, re.I)]
+    filters = [line for line in mng_lines if re.match(r"vlan-filter iphost 1\b", line, re.I)]
+    if len(filter_modes) > 1 or (filters and not filter_modes):
+        raise PlanError("The ONU's IP-host VLAN filter is inconsistent; inspect its OLT configuration manually.")
+    if len(filters) > 1:
+        raise PlanError("The ONU has multiple IP-host VLAN filters; inspect its OLT configuration manually.")
+    filter_parts = [re.fullmatch(r"vlan-filter iphost 1 (pri|priority) (\d+) (vlan|vid) (\d+)", line, re.I)
+                   for line in filters]
+    if len(filters) != len(filter_parts):
+        raise PlanError("Could not safely identify the ONU's current IP-host VLAN filter; no changes were sent.")
+    filter_priority = filter_parts[0].group(2) if filter_parts else "0"
+    filter_priority_keyword = filter_parts[0].group(1).lower() if filter_parts else prof.reg_routing_priority_keyword
+    filter_vlan_keyword = filter_parts[0].group(3).lower() if filter_parts else prof.reg_routing_vlan_keyword
+
+    onu_vlans = [line for line in mng_lines if re.match(r"onu-vlan iphost 1\b", line, re.I)]
+    if len(onu_vlans) > 1 or (onu_vlans and not re.fullmatch(
+            r"onu-vlan iphost 1 up-mode add up-pri \d+ up-vlan \d+ down-mode transparent",
+            onu_vlans[0], re.I)):
+        raise PlanError("Could not safely identify the ONU's current IP-host VLAN; no changes were sent.")
+
+    current_service_port = service_ports[0]
+    target_service_port = prof.reg_service_port.format(vlan=vlan)
+    target_filter_mode = (filter_modes[0] if filter_modes else
+                         f"vlan-filter-mode iphost 1 tag-filter {prof.reg_routing_filter} untag-filter transparent")
+    target_flow = f"flow 1 {flow_priority_keyword} {flow_priority} {flow_vlan_keyword} {vlan}"
+    target_filter = (f"vlan-filter iphost 1 {filter_priority_keyword} {filter_priority} "
+                    f"{filter_vlan_keyword} {vlan}")
+    target_onu_vlan = f"onu-vlan iphost 1 up-mode add up-pri 0 up-vlan {vlan} down-mode transparent"
+
+    commands = []
+    if current_service_port != target_service_port:
+        commands += [f"interface {n_if}", "no service-port 1", target_service_port, "exit"]
+    commands.append(f"pon-onu-mng {n_if}")
+    commands += [flow_mode, target_flow, target_filter_mode, target_filter, target_onu_vlan, "exit"]
+
+    return Plan("onu_mode", "Update ONU VLAN (routing mode)", n_if, commands,
+               warnings=["Only VLAN mapping is updated. Existing PPPoE credentials, GEM port, and switch binding are not recreated.",
+                         "There is no automatic rollback for this targeted VLAN update. Review the live-config preview carefully; the ONU may briefly lose service."],
+               dangerous=True,
+               meta={"vlan": vlan, "mode": "routing", "user": onu.pppoe_user, "routing_vlan_only": True})
 
 
 def pppoe_creds(p: dict) -> tuple[str, str]:
@@ -272,6 +375,16 @@ def plan_reboot(olt, onu, p, ctx) -> Plan:
     return _onu_plan("reboot_onu", "Reboot ONU", onu, olt, [f"pon-onu-mng {_onu_if(olt, onu)}", "reboot", "exit"])
 
 
+def plan_repush(olt, onu, p, ctx) -> Plan:
+    return _onu_plan(
+        "repush_onu", "Repush OLT configuration to ONU", onu, olt,
+        [f"pon-onu-mng {_onu_if(olt, onu)}", "reboot", "exit"],
+        dangerous=True,
+        warns=["This reboots the ONU and interrupts service temporarily.",
+               "The OLT can only reapply configuration currently stored on it; this does not recreate missing OLT configuration."],
+    )
+
+
 def plan_rename(olt, onu, p, ctx) -> Plan:
     raw_name = ("" if p.get("name") is None else str(p.get("name"))).strip()
     if len(raw_name) > 64:
@@ -349,9 +462,18 @@ def plan_onu_mode(olt, onu, p, ctx) -> Plan:
         raise PlanError("Dual-stack IPv4/IPv6 is not supported yet")
     if mode == "routing" and p.get("wan_mode", "pppoe") != "pppoe":
         raise PlanError("WAN DHCP/Static IP mode is not supported yet (no OLT config example is available); use PPPoE")
+    prof = _prof(olt)
+    if mode == "routing" and onu.mode == "routing" and not (prof.reg_routing_service and prof.reg_pppoe_wan):
+        vlan = vlan_id(p.get("wan_vlan"), "WAN VLAN-ID")
+        return _onu_plan(
+            "onu_mode", "Update ONU VLAN (routing mode)", onu, olt, [],
+            dangerous=True,
+            warns=["Only the VLAN mapping is updated; existing PPPoE credentials and GEM configuration are preserved.",
+                   "The ONU may briefly lose service."],
+            meta={"vlan": vlan, "mode": "routing", "user": onu.pppoe_user, "routing_vlan_only": True},
+        )
     svc = ident(p.get("service") or "INT", "Service name")
     n_if = _onu_if(olt, onu)
-    prof = _prof(olt)
     sp_if = _vport_if(olt, onu.shelf, onu.slot, onu.pon, onu.onu_number) or n_if      # C6xx: service-port di interface vport
     cmds = [f"interface {sp_if}", "no service-port 1", prof.reg_service_port.format(vlan=vlan), "exit", f"pon-onu-mng {n_if}"]
     user = ""
@@ -362,7 +484,7 @@ def plan_onu_mode(olt, onu, p, ctx) -> Plan:
         cmds += bridge_lines(svc, vlan, ctx.get("eth_ports"), prof)
     cmds.append("exit")
     return _onu_plan("onu_mode", "Update ONU mode", onu, olt, cmds, dangerous=True,
-                     warns=["Changing the mode briefly interrupts service. Previous-mode lines (e.g. 'service'/'vlan port' when switching to routing) are not removed automatically; review the preview.",
+                     warns=["Changing the mode briefly interrupts service. Existing bridge service and VLAN-port lines are removed before routing commands are applied.",
                             "'no service-port 1' before recreating it is unverified in your config."],
                      meta={"vlan": vlan, "mode": mode, "user": user})
 
@@ -445,10 +567,52 @@ def plan_push_speed(olt, onu, p, ctx) -> Plan:
                 warnings=["The 'gpon' mode command follows the running-config structure; review the preview."])
 
 
-ONU_ACTIONS = {"delete_onu": plan_delete, "reboot_onu": plan_reboot, "restore_onu": plan_restore, "disable_onu": plan_admin(False),
+def plan_tcont_conversion(olt, onu, p, ctx) -> Plan:
+    profiles = p.get("profiles")
+    if not isinstance(profiles, list) or not profiles or len(profiles) > 500:
+        raise PlanError("Provide the complete list of Type 1 T-CONT profiles from the current preview.")
+    names = set()
+    grouped = {}
+    for profile in profiles:
+        if not isinstance(profile, dict) or profile.get("type") != 1:
+            raise PlanError("Only Type 1 T-CONT profiles can be converted.")
+        name = ident(profile.get("name"), "T-CONT profile name", 60)
+        mode = profile.get("mode", "gpon")
+        if mode not in ("gpon", "pon"):
+            raise PlanError(f"T-CONT profile {name} has an unsupported configuration mode.")
+        if name in names:
+            raise PlanError(f"Duplicate T-CONT profile: {name}")
+        names.add(name)
+        parameters = profile.get("parameters")
+        if not isinstance(parameters, dict) or set(parameters) != {"fixed"}:
+            raise PlanError(f"T-CONT profile {name} must have exactly one fixed value.")
+        try:
+            kbps = int(parameters["fixed"])
+        except (TypeError, ValueError):
+            raise PlanError(f"T-CONT profile {name} has an invalid fixed value.")
+        if not 1 <= kbps <= 1_000_000_000:
+            raise PlanError(f"T-CONT profile {name} has an invalid fixed value.")
+        old_lines, new_lines = grouped.setdefault(mode, ([], []))
+        old_lines.append(f"profile tcont {name} type 1 fixed {kbps}")
+        new_lines.append(f"profile tcont {name} type 4 maximum {kbps}")
+    commands = [command for mode, (_, new_lines) in grouped.items() for command in (mode, *new_lines, "exit")]
+    rollback = [command for mode, (old_lines, _) in grouped.items() for command in (mode, *old_lines, "exit")]
+    return Plan(
+        "convert_tcont",
+        f"Convert {len(names)} T-CONT profile(s) to Best Effort",
+        olt.name,
+        commands,
+        rollback=rollback,
+        warnings=["Type 1 fixed profiles will become Type 4 Best Effort; each configured kbps value is preserved."],
+        meta={"count": len(names), "profiles": sorted(names)},
+    )
+
+
+ONU_ACTIONS = {"delete_onu": plan_delete, "reboot_onu": plan_reboot, "repush_onu": plan_repush, "restore_onu": plan_restore, "disable_onu": plan_admin(False),
                "enable_onu": plan_admin(True), "eth_state": plan_eth, "eth_config": plan_eth_config, "onu_mode": plan_onu_mode,
                "pppoe_credentials": plan_pppoe_credentials, "apply_speed": plan_apply_speed, "rename_onu": plan_rename}
-OLT_ACTIONS = {"vlan_add": plan_vlan_add, "uplink_vlan": plan_uplink_vlan, "push_speed": plan_push_speed}
+OLT_ACTIONS = {"vlan_add": plan_vlan_add, "uplink_vlan": plan_uplink_vlan, "push_speed": plan_push_speed,
+               "convert_tcont": plan_tcont_conversion}
 
 
 async def verify_speed_profiles(cli, olt, ul: str | None, dl: str | None) -> None:
@@ -484,7 +648,7 @@ class ExecResult:
 
 async def run_plan(conn, commands: list[str], rollback: list[str] | None = None, pre=None) -> ExecResult:
     """Enter `configure terminal`, run commands one at a time, stop at the first error (then roll back
-    if applicable), and ALWAYS exit with `end`. Try an alternative flow VLAN keyword only if the OLT explicitly
+    if applicable), and ALWAYS exit with `end`. Try an alternative VLAN/filter keyword only if the OLT explicitly
     rejects the original. `pre(cli)` is a read-only check before changing configuration.
 
     Safety: run rollback `no onu N` only if `onu N type … sn …` succeeded in this execution.
@@ -507,10 +671,18 @@ async def run_plan(conn, commands: list[str], rollback: list[str] | None = None,
                 r"(flow \d+ (?:pri|priority) \d+|vlan-filter iphost \d+ (?:pri|priority) \d+) (vlan|vid) (\d+)",
                 cmd.strip(),
             )
-            if not match:
-                return None
-            keyword = "vid" if match.group(2) == "vlan" else "vlan"
-            return f"{match.group(1)} {keyword} {match.group(3)}"
+            if match:
+                keyword = "vid" if match.group(2) == "vlan" else "vlan"
+                return f"{match.group(1)} {keyword} {match.group(3)}"
+            filter_match = re.fullmatch(
+                r"(flow mode \d+ tag-filter|vlan-filter-mode iphost \d+ tag-filter) "
+                r"(vlan-filter|vid-filter) (untag-filter (?:discard|transparent))",
+                cmd.strip(),
+            )
+            if filter_match:
+                keyword = "vid-filter" if filter_match.group(2) == "vlan-filter" else "vlan-filter"
+                return f"{filter_match.group(1)} {keyword} {filter_match.group(3)}"
+            return None
 
         if pre:
             repl = await pre(cli)
@@ -526,7 +698,12 @@ async def run_plan(conn, commands: list[str], rollback: list[str] | None = None,
             else:
                 for i, c in enumerate(commands):
                     bad = await step(c)
-                    alternate = alternate_vlan_keyword(c) if bad and last["r"].error and last["r"].complete else None
+                    syntax_error = bool(re.search(
+                        r"invalid (?:input|command|parameter)|unknown command|incomplete command|"
+                        r"ambiguous command|unrecognized command",
+                        last["r"].text, re.I,
+                    ))
+                    alternate = alternate_vlan_keyword(c) if bad and last["r"].error and last["r"].complete and syntax_error else None
                     if alternate:
                         log[-1]["fallback_to"] = mask(alternate)
                         bad = await step(alternate)

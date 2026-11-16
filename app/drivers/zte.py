@@ -88,8 +88,7 @@ PROFILES = {
     "c6xx": Profile(olt_if="gpon_olt-{shelf}/{slot}/{pon}", onu_if="gpon_onu-{shelf}/{slot}/{pon}:{onu}",
                     vport_if="vport-{shelf}/{slot}/{pon}.{onu}:{vport}",
                     uncfg_cmd="show pon onu uncfg", uncfg_cmd_alt="show gpon onu uncfg",
-                    cfg_cmds=("show running-config interface {onu_if}", "show running-config interface {vport_if}",
-                              "show onu running config {onu_if}"),
+                    cfg_cmds=("show running-config-interface {onu_if}", "show running-config-interface {vport_if}"),
                     mac_cmd="show mac interface {vport_if}",
                     oid_state="", oid_rx="", oid_olt_rx="",
                     reg_tcont="tcont 1 profile {ul}", reg_gemport="gemport 1 tcont 1", reg_dl_limit="", reg_hybrid="",
@@ -250,6 +249,27 @@ class LinkRegistry:
                     await link.tel.close()
                     link.tel = None
                     raise
+        finally:
+            link.last_used = time.monotonic()
+            link.lock.release()
+
+    @asynccontextmanager
+    async def fresh_session(self, conn: OltConn, wait: float = 60,
+                            lane: Literal["config", "poll", "check", "sync"] = "check"):
+        """Open a one-off Telnet connection, serialized with other work in the selected lane."""
+        link = self._links.setdefault((conn.id, lane), _Link())
+        try:
+            await asyncio.wait_for(link.lock.acquire(), wait)
+        except asyncio.TimeoutError:
+            raise BusyError("The OLT is busy with another operation; try again shortly")
+        try:
+            async with self._semaphore():
+                tel = TelnetSession(conn.ip, conn.telnet_port, settings.telnet_timeout)
+                try:
+                    await tel.login(conn.telnet_user, conn.telnet_pass, conn.enable_pass)
+                    yield tel
+                finally:
+                    await tel.close()
         finally:
             link.last_used = time.monotonic()
             link.lock.release()
